@@ -62,6 +62,10 @@ class CellStyle:
     border_bottom: Optional[str] = None
     border_left: Optional[str] = None
     border_right: Optional[str] = None
+    border_top_color: Optional[str] = None
+    border_bottom_color: Optional[str] = None
+    border_left_color: Optional[str] = None
+    border_right_color: Optional[str] = None
     border_line_style: Optional[str] = None  # 线型: solid/dashed/dotted/dash_dot/double
     border_width: Optional[int] = None       # 粗细: 1-5
     number_format: Optional[str] = None   # NumberFormat 值
@@ -72,6 +76,7 @@ class CellStyle:
         for attr in ("font_family", "font_family_western", "font_size", "bold", "italic",
                      "underline", "alignment", "vertical_alignment", "bg_color", "fg_color",
                      "border_top", "border_bottom", "border_left", "border_right",
+                     "border_top_color", "border_bottom_color", "border_left_color", "border_right_color",
                      "border_line_style", "border_width",
                      "number_format"):
             val = getattr(other, attr)
@@ -121,6 +126,10 @@ class CellStyle:
             border_bottom=self.border_bottom,
             border_left=self.border_left,
             border_right=self.border_right,
+            border_top_color=self.border_top_color,
+            border_bottom_color=self.border_bottom_color,
+            border_left_color=self.border_left_color,
+            border_right_color=self.border_right_color,
             border_line_style=self.border_line_style,
             border_width=self.border_width,
             number_format=self.number_format,
@@ -130,7 +139,9 @@ class CellStyle:
         result = {}
         for attr in ("font_family", "font_family_western", "font_size", "bold", "italic", "underline",
                      "alignment", "vertical_alignment", "bg_color", "fg_color", "border_top", "border_bottom",
-                     "border_left", "border_right", "border_line_style", "border_width", "number_format"):
+                     "border_left", "border_right", "border_top_color", "border_bottom_color",
+                     "border_left_color", "border_right_color", "border_line_style", "border_width",
+                     "number_format"):
             val = getattr(self, attr)
             if val is not None:
                 result[attr] = val

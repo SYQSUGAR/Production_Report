@@ -22,6 +22,7 @@ from ui.style_panel import StylePanel
 from ui.formula_bar import FormulaBar
 from export.excel_exporter import ExcelExporter
 from export.template_io import TemplateIO
+from export.excel_importer import ExcelImporter
 from database.db_handler import DbHandler
 from templates.presets import BUILTIN_TEMPLATES
 
@@ -110,6 +111,17 @@ class _UndoManager:
     def update_edit(self, text: str):
         """记录编辑过程中的最新文本（不推入栈）。"""
         self._latest_text = text
+
+    def record_change(self, row: int, col: int, old: str, new: str):
+        """立即记录一次已经完成的内容变更。"""
+        self._commit()
+        if old == new:
+            return
+        self._undo_stack.append((row, col, old, new))
+        self._redo_stack.clear()
+        self._editing_cell = (row, col)
+        self._start_text = new
+        self._latest_text = new
 
     def _commit(self):
         """将当前编辑批次推入撤销栈。"""
@@ -542,8 +554,11 @@ class MainWindow(QMainWindow):
 
     def _on_cell_edited(self, row: int, col: int, text: str):
         """双击单元格编辑完成 → 同步公式栏。"""
+        old = self._formula_bar.get_content() if (
+            self._formula_bar._current_row == row and self._formula_bar._current_col == col
+        ) else ""
+        self._undo_mgr.record_change(row, col, old, text)
         self._formula_bar.set_current_cell(row, col, text)
-        self._undo_mgr.update_edit(text)
 
     def _on_style_changed(self):
         self._preview.refresh_all()
@@ -551,15 +566,19 @@ class MainWindow(QMainWindow):
     def _on_formula_content_changed(self, row: int, col: int, text: str):
         """公式栏文本变更 → 更新单元格数据。"""
         cd = self._template.get_cell_data(row, col)
+        old = cd.static_text
         cd.static_text = text
         self._template.set_cell_data(row, col, cd)
         self._preview.refresh_cell(row, col)
-        self._undo_mgr.update_edit(text)
+        self._undo_mgr.record_change(row, col, old, text)
 
     def _on_batch_apply(self, text: str):
         """批量赋值到选中的多个单元格。"""
         cells = self._preview.get_selected_cells()
-        self._preview.batch_set_text(cells, text)
+        for row, col in cells:
+            old = self._template.get_cell_data(row, col).static_text
+            self._preview.set_cell_text(row, col, text)
+            self._undo_mgr.record_change(row, col, old, text)
         self._status_label.setText(f"已批量赋值 {len(cells)} 个单元格")
 
     # ------------------------------------------------------------------
@@ -851,36 +870,25 @@ class MainWindow(QMainWindow):
     # 导入导出
     # ==================================================================
     def _import_excel(self):
-        """从 Excel 导入数据（读取 xlsx/xls 作为模板参考）。"""
+        """从 Excel 导入首个工作表的内容、布局和样式。"""
         filepath, _ = QFileDialog.getOpenFileName(
             self, "导入 Excel 文件",
             self._last_directory,
-            "Excel 文件 (*.xlsx *.xls)",
+            "Excel 工作簿 (*.xlsx *.xlsm);;旧版 Excel (*.xls)",
         )
         if not filepath:
             return
 
         try:
-            import openpyxl
-            # 尝试以 data_only 模式读取 xlsx
-            wb = openpyxl.load_workbook(filepath, data_only=True)
-            ws = wb.active
-            data = []
-            for row in ws.iter_rows(values_only=True):
-                data.append([str(cell) if cell is not None else "" for cell in row])
-
-            if data:
-                self._template = TemplateModel(rows=len(data), cols=len(data[0]))
-                for r_idx, row_data in enumerate(data):
-                    for c_idx, val in enumerate(row_data):
-                        cd = CellData(static_text=val)
-                        self._template.set_cell_data(r_idx, c_idx, cd)
-
-                self._apply_loaded_template(self._template, f"导入: {os.path.basename(filepath)}")
-                self._status_label.setText(f"已导入 Excel: {filepath}")
+            template = ExcelImporter.import_file(filepath)
+            self._last_directory = os.path.dirname(filepath)
+            self._settings.setValue("last_directory", self._last_directory)
+            self._apply_loaded_template(template, template.template_name)
+            self._current_filepath = ""
+            self._status_label.setText(f"已完整导入 Excel: {filepath}")
         except Exception as e:
             err_msg = str(e)
-            if "not a zip" in err_msg.lower() or "zipfile" in err_msg.lower():
+            if filepath.lower().endswith(".xls") or "not a zip" in err_msg.lower() or "zipfile" in err_msg.lower():
                 QMessageBox.warning(
                     self, "格式不支持",
                     "该文件不是有效的 .xlsx 格式。\n\n"

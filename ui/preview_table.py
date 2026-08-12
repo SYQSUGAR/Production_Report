@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QStyledItemDelegate, QStyle,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QRect
+from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSignalBlocker
 from PyQt6.QtGui import QColor, QFont, QBrush, QPen, QPainter
 
 from models.template_model import TemplateModel, StyleScope, MergeRange, CellData
@@ -20,24 +20,36 @@ class BorderDelegate(QStyledItemDelegate):
         border_data = index.data(Qt.ItemDataRole.UserRole)
         if not border_data:
             return
-        top, bottom, left, right, line_style, width = border_data
-        color = QColor("#A0A8B4")
-        pen = QPen(color)
-        pen.setWidth(max(width or 1, 1))
+        top, bottom, left, right, line_style, width, colors = border_data
+        width = max(width or 1, 1)
         style_map = {"solid": Qt.PenStyle.SolidLine, "dashed": Qt.PenStyle.DashLine,
                      "dotted": Qt.PenStyle.DotLine, "dash_dot": Qt.PenStyle.DashDotLine,
                      "double": Qt.PenStyle.SolidLine}
-        pen.setStyle(style_map.get(line_style, Qt.PenStyle.SolidLine))
-        painter.setPen(pen)
-        rect = option.rect
-        if top:
-            painter.drawLine(rect.topLeft(), rect.topRight())
-        if bottom:
-            painter.drawLine(rect.bottomLeft(), rect.bottomRight())
-        if left:
-            painter.drawLine(rect.topLeft(), rect.bottomLeft())
-        if right:
-            painter.drawLine(rect.topRight(), rect.bottomRight())
+        rect = option.rect.adjusted(0, 0, -1, -1)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        def draw_side(side_style, color, start, end):
+            if not side_style:
+                return
+            pen = QPen(QColor(color or "#606770"))
+            pen.setWidth(width)
+            effective_style = side_style if side_style in style_map else line_style
+            pen.setStyle(style_map.get(effective_style, Qt.PenStyle.SolidLine))
+            painter.setPen(pen)
+            painter.drawLine(start, end)
+            # Qt 没有原生单元格双线，使用两条平行线模拟。
+            if effective_style == "double":
+                dx = 0 if start.x() != end.x() else (1 if start.x() == rect.left() else -1)
+                dy = 0 if start.y() != end.y() else (1 if start.y() == rect.top() else -1)
+                painter.drawLine(start.x() + dx * 2, start.y() + dy * 2,
+                                 end.x() + dx * 2, end.y() + dy * 2)
+
+        draw_side(top, colors[0], rect.topLeft(), rect.topRight())
+        draw_side(bottom, colors[1], rect.bottomLeft(), rect.bottomRight())
+        draw_side(left, colors[2], rect.topLeft(), rect.bottomLeft())
+        draw_side(right, colors[3], rect.topRight(), rect.bottomRight())
+        painter.restore()
 
 
 
@@ -111,6 +123,9 @@ class PreviewTable(QTableWidget):
         vh.setSectionsClickable(True)
 
         self.setAlternatingRowColors(False)
+        # 默认网格线会与自定义边框叠加并掩盖线型，边框完全交给委托绘制。
+        self.setShowGrid(False)
+        self.setStyleSheet("QTableView::item { border: none; padding: 1px; }")
 
         # 选中后按任意键即可编辑（类 Excel 行为）
         self.setEditTriggers(
@@ -210,6 +225,7 @@ class PreviewTable(QTableWidget):
     # ------------------------------------------------------------------
     def refresh_cell(self, row: int, col: int):
         """刷新单个单元格的显示，处理合并单元格。"""
+        blocker = QSignalBlocker(self)
         # 检查是否为合并区域中的非主格（被隐藏的单元格）
         mr = self._template.get_merge_range(row, col)
         if mr and not mr.is_top_left(row, col):
@@ -236,6 +252,7 @@ class PreviewTable(QTableWidget):
 
         style = self._template.get_effective_style(row, col)
         self._apply_style_to_item(item, style)
+        del blocker
 
     def refresh_all(self):
         """刷新全部单元格，并重建合并单元格的 span。"""
@@ -291,8 +308,12 @@ class PreviewTable(QTableWidget):
                 style.border_left, style.border_right,
                 style.border_line_style or "solid",
                 style.border_width or 1,
+                (style.border_top_color, style.border_bottom_color,
+                 style.border_left_color, style.border_right_color),
             )
             item.setData(Qt.ItemDataRole.UserRole, border_data)
+        else:
+            item.setData(Qt.ItemDataRole.UserRole, None)
 
     # ------------------------------------------------------------------
     # 获取 / 设置数据
@@ -344,6 +365,15 @@ class PreviewTable(QTableWidget):
         self.setColumnCount(cols)
         self.setHorizontalHeaderLabels([chr(65 + i) for i in range(cols)])
         self.setVerticalHeaderLabels([str(i + 1) for i in range(rows)])
+        self._init_data()
+        self.verticalHeader().setDefaultSectionSize(36)
+        self.horizontalHeader().setDefaultSectionSize(100)
+        for r, height in self._template.row_heights.items():
+            if r < rows:
+                self.setRowHeight(r, height)
+        for c, width in self._template.col_widths.items():
+            if c < cols:
+                self.setColumnWidth(c, width)
         self.refresh_all()
 
     def set_template(self, template: TemplateModel):
