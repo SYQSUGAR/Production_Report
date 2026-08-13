@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QLabel, QWidget, QVBoxLayout, QHBoxLayout,
     QMenuBar, QMenu, QInputDialog, QDateEdit, QComboBox, QFontComboBox,
     QSpinBox, QColorDialog, QPushButton, QToolButton, QSlider,
-    QDialog, QDialogButtonBox, QFormLayout, QLineEdit,
+    QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QApplication,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QDate, QSettings
 from PyQt6.QtGui import QAction, QColor, QFont
@@ -88,14 +88,17 @@ class _DbConfigDialog(QDialog):
 
 
 class _UndoManager:
-    """管理单元格文本编辑的撤销/恢复栈。
+    """管理撤销/恢复栈，支持批量操作（文本 + 样式）。
 
-    同一单元格的连续编辑合并为一个撤销条目。
+    一个撤销条目是一组 change，每个 change 是元组：
+        ("text",  row, col, old_text, new_text)
+        ("style", row, col, old_style, new_style)
+    批量操作（如粘贴、批量赋值）只占一个撤销条目，撤销/恢复时整体执行。
     """
 
     def __init__(self):
-        self._undo_stack: list[tuple[int, int, str, str]] = []  # (row, col, old, new)
-        self._redo_stack: list[tuple[int, int, str, str]] = []
+        self._undo_stack: list[list[tuple]] = []
+        self._redo_stack: list[list[tuple]] = []
         self._editing_cell: tuple | None = None
         self._start_text: str = ""
         self._latest_text: str = ""
@@ -112,46 +115,53 @@ class _UndoManager:
         """记录编辑过程中的最新文本（不推入栈）。"""
         self._latest_text = text
 
-    def record_change(self, row: int, col: int, old: str, new: str):
-        """立即记录一次已经完成的内容变更。"""
+    def record_text(self, row: int, col: int, old: str, new: str):
+        """记录一次已完成的单个单元格文本变更。"""
         self._commit()
         if old == new:
             return
-        self._undo_stack.append((row, col, old, new))
+        self._undo_stack.append([("text", row, col, old, new)])
         self._redo_stack.clear()
-        self._editing_cell = (row, col)
-        self._start_text = new
-        self._latest_text = new
+
+    def record_change(self, row: int, col: int, old: str, new: str):
+        """兼容旧调用名称。"""
+        self.record_text(row, col, old, new)
+
+    def record_batch(self, changes: list[tuple]):
+        """记录一次批量变更（可混合文本/样式），作为一个撤销单元。"""
+        self._commit()
+        if not changes:
+            return
+        self._undo_stack.append(list(changes))
+        self._redo_stack.clear()
 
     def _commit(self):
-        """将当前编辑批次推入撤销栈。"""
+        """将当前编辑批次（单个单元格连续输入）推入撤销栈。"""
         if self._editing_cell is None:
             return
         if self._latest_text != self._start_text:
-            self._undo_stack.append((*self._editing_cell, self._start_text, self._latest_text))
+            r, c = self._editing_cell
+            self._undo_stack.append([("text", r, c, self._start_text, self._latest_text)])
             self._redo_stack.clear()
-            self._start_text = self._latest_text  # 让后续编辑基于当前文本开始
         self._editing_cell = None
 
-    def undo(self, apply_func) -> bool:
-        """执行撤销，通过 apply_func(row, col, text) 应用到界面。"""
+    def undo(self) -> list[tuple] | None:
+        """撤销一步，返回该步的 change 列表。"""
         self._commit()
         if not self._undo_stack:
-            return False
-        row, col, old, new = self._undo_stack.pop()
-        self._redo_stack.append((row, col, old, new))
-        apply_func(row, col, old)
-        return True
+            return None
+        changes = self._undo_stack.pop()
+        self._redo_stack.append(changes)
+        return changes
 
-    def redo(self, apply_func) -> bool:
-        """执行恢复。"""
+    def redo(self) -> list[tuple] | None:
+        """恢复一步，返回该步的 change 列表。"""
         self._commit()
         if not self._redo_stack:
-            return False
-        row, col, old, new = self._redo_stack.pop()
-        self._undo_stack.append((row, col, old, new))
-        apply_func(row, col, new)
-        return True
+            return None
+        changes = self._redo_stack.pop()
+        self._undo_stack.append(changes)
+        return changes
 
     def clear(self):
         self._undo_stack.clear()
@@ -189,6 +199,12 @@ class MainWindow(QMainWindow):
 
         # 撤销管理器
         self._undo_mgr = _UndoManager()
+
+        # 内部剪贴板（复制/粘贴）
+        self._clipboard: dict | None = None
+        self._clipboard_system_text: str = ""
+        # 格式剪贴板（格式拷贝/格式粘贴，独立于普通复制）
+        self._format_clipboard: dict | None = None
 
         # 当前打开的文件路径
         self._current_filepath: str = ""
@@ -302,6 +318,32 @@ class MainWindow(QMainWindow):
 
         edit_menu.addSeparator()
 
+        act_copy = QAction("复制(&C)", self)
+        act_copy.setShortcut("Ctrl+C")
+        act_copy.triggered.connect(self._copy)
+        edit_menu.addAction(act_copy)
+
+        act_paste = QAction("粘贴(&V)", self)
+        act_paste.setShortcut("Ctrl+V")
+        act_paste.triggered.connect(self._paste)
+        edit_menu.addAction(act_paste)
+
+        act_paste_values = QAction("仅粘贴内容", self)
+        act_paste_values.triggered.connect(self._paste_values)
+        edit_menu.addAction(act_paste_values)
+
+        act_copy_format = QAction("格式拷贝(&F)", self)
+        act_copy_format.setShortcut("Ctrl+Shift+C")
+        act_copy_format.triggered.connect(self._copy_format)
+        edit_menu.addAction(act_copy_format)
+
+        act_paste_format = QAction("格式粘贴(&P)", self)
+        act_paste_format.setShortcut("Ctrl+Shift+V")
+        act_paste_format.triggered.connect(self._paste_format)
+        edit_menu.addAction(act_paste_format)
+
+        edit_menu.addSeparator()
+
         act_merge = QAction("合并单元格(&M)", self)
         act_merge.setShortcut("Ctrl+M")
         act_merge.triggered.connect(self._merge_cells)
@@ -340,6 +382,11 @@ class MainWindow(QMainWindow):
         act_db_test.triggered.connect(self._db_test_connect)
         db_menu.addAction(act_db_test)
 
+        act_refresh = QAction("刷新查询结果", self)
+        act_refresh.setShortcut("F5")
+        act_refresh.triggered.connect(self._refresh_query_results)
+        db_menu.addAction(act_refresh)
+
     # ==================================================================
     # 工具栏
     # ==================================================================
@@ -361,83 +408,25 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        # 中文字体
-        self._tb_font = QFontComboBox()
-        self._tb_font.setCurrentFont(QFont("宋体"))
-        self._tb_font.setFixedWidth(130)
-        self._tb_font.setToolTip("中文字体")
-        self._tb_font.currentFontChanged.connect(self._on_tb_font_changed)
-        tb.addWidget(self._tb_font)
+        act_copy = QAction("复制", self)
+        act_copy.setToolTip("复制 (Ctrl+C)")
+        act_copy.triggered.connect(self._copy)
+        tb.addAction(act_copy)
 
-        # 西文字体
-        self._tb_font_western = QFontComboBox()
-        self._tb_font_western.setCurrentFont(QFont("Times New Roman"))
-        self._tb_font_western.setFixedWidth(130)
-        self._tb_font_western.setToolTip("西文字体")
-        self._tb_font_western.currentFontChanged.connect(self._on_tb_font_western_changed)
-        tb.addWidget(self._tb_font_western)
+        act_paste = QAction("粘贴", self)
+        act_paste.setToolTip("粘贴 (Ctrl+V)")
+        act_paste.triggered.connect(self._paste)
+        tb.addAction(act_paste)
 
-        self._tb_font_size = QSpinBox()
-        self._tb_font_size.setRange(6, 72)
-        self._tb_font_size.setValue(10)
-        self._tb_font_size.setFixedWidth(50)
-        self._tb_font_size.valueChanged.connect(self._on_tb_font_size_changed)
-        tb.addWidget(self._tb_font_size)
+        act_copy_format = QAction("格式拷贝", self)
+        act_copy_format.setToolTip("格式拷贝 (Ctrl+Shift+C)")
+        act_copy_format.triggered.connect(self._copy_format)
+        tb.addAction(act_copy_format)
 
-        tb.addSeparator()
-
-        act_bold = QAction("B", self)
-        act_bold.setToolTip("粗体")
-        act_bold.triggered.connect(self._on_tb_bold)
-        tb.addAction(act_bold)
-
-        act_italic = QAction("I", self)
-        act_italic.setToolTip("斜体")
-        act_italic.triggered.connect(self._on_tb_italic)
-        tb.addAction(act_italic)
-
-        act_underline = QAction("U", self)
-        act_underline.setToolTip("下划线")
-        act_underline.triggered.connect(self._on_tb_underline)
-        tb.addAction(act_underline)
-
-        tb.addSeparator()
-
-        act_align_l = QAction("左对齐", self)
-        act_align_l.triggered.connect(self._on_tb_align_left)
-        tb.addAction(act_align_l)
-
-        act_align_c = QAction("居中", self)
-        act_align_c.triggered.connect(self._on_tb_align_center)
-        tb.addAction(act_align_c)
-
-        act_align_r = QAction("右对齐", self)
-        act_align_r.triggered.connect(self._on_tb_align_right)
-        tb.addAction(act_align_r)
-
-        tb.addSeparator()
-
-        act_valign_t = QAction("上对齐", self)
-        act_valign_t.triggered.connect(self._on_tb_valign_top)
-        tb.addAction(act_valign_t)
-
-        act_valign_c = QAction("垂直居中", self)
-        act_valign_c.triggered.connect(self._on_tb_valign_center)
-        tb.addAction(act_valign_c)
-
-        act_valign_b = QAction("下对齐", self)
-        act_valign_b.triggered.connect(self._on_tb_valign_bottom)
-        tb.addAction(act_valign_b)
-
-        tb.addSeparator()
-
-        act_fg = QAction("字体颜色", self)
-        act_fg.triggered.connect(self._on_tb_fg_color)
-        tb.addAction(act_fg)
-
-        act_bg = QAction("背景颜色", self)
-        act_bg.triggered.connect(self._on_tb_bg_color)
-        tb.addAction(act_bg)
+        act_paste_format = QAction("格式粘贴", self)
+        act_paste_format.setToolTip("格式粘贴 (Ctrl+Shift+V)")
+        act_paste_format.triggered.connect(self._paste_format)
+        tb.addAction(act_paste_format)
 
         tb.addSeparator()
 
@@ -526,9 +515,14 @@ class MainWindow(QMainWindow):
         self._preview.selection_changed.connect(self._on_selection_changed)
         self._preview.cells_selected.connect(self._on_cells_selected)
         self._preview.cell_edited.connect(self._on_cell_edited)
+        self._preview.copy_requested.connect(self._copy)
+        self._preview.paste_requested.connect(self._paste)
+        self._preview.undo_requested.connect(self._undo)
+        self._preview.redo_requested.connect(self._redo)
 
         # 样式面板变更 → 刷新预览
         self._style_panel.style_changed.connect(self._on_style_changed)
+        self._style_panel.style_transaction.connect(self._undo_mgr.record_batch)
 
         # 公式栏内容变更
         self._formula_bar.content_changed.connect(self._on_formula_content_changed)
@@ -574,11 +568,14 @@ class MainWindow(QMainWindow):
         old = self._formula_bar.get_content() if (
             self._formula_bar._current_row == row and self._formula_bar._current_col == col
         ) else ""
-        self._undo_mgr.record_change(row, col, old, text)
+        self._undo_mgr.record_text(row, col, old, text)
         self._formula_bar.set_current_cell(row, col, text)
 
     def _on_style_changed(self):
+        selected = self._preview.get_selected_cells()
+        current = (self._preview.currentRow(), self._preview.currentColumn())
         self._preview.refresh_all()
+        self._preview.select_cells(selected, current)
 
     def _on_zoom_slider_changed(self, value: int):
         """底部缩放滑块变更 → 更新表格。"""
@@ -599,141 +596,312 @@ class MainWindow(QMainWindow):
         cd.static_text = text
         self._template.set_cell_data(row, col, cd)
         self._preview.refresh_cell(row, col)
-        self._undo_mgr.record_change(row, col, old, text)
+        self._undo_mgr.record_text(row, col, old, text)
 
     def _on_batch_apply(self, text: str):
-        """批量赋值到选中的多个单元格。"""
+        """批量赋值到选中的多个单元格（作为一个撤销单元）。"""
         cells = self._preview.get_selected_cells()
+        changes = []
         for row, col in cells:
             old = self._template.get_cell_data(row, col).static_text
             self._preview.set_cell_text(row, col, text)
-            self._undo_mgr.record_change(row, col, old, text)
+            if old != text:
+                changes.append(("text", row, col, old, text))
+        self._undo_mgr.record_batch(changes)
         self._status_label.setText(f"已批量赋值 {len(cells)} 个单元格")
-
-    # ------------------------------------------------------------------
-    # 工具栏快速样式
-    # ------------------------------------------------------------------
-    def _quick_apply_style(self, **kwargs):
-        """快速应用样式到选中范围（多选时批量应用）。"""
-        scope, row, col = self._preview.get_current_scope_info()
-        cells = self._preview.get_selected_cells()
-
-        # 目标单元格列表
-        if len(cells) > 1:
-            targets = cells  # 多选 → 逐个 cell
-        elif scope == "column" and col >= 0:
-            targets = [(r, col) for r in range(self._template.rows)]
-        elif scope == "row" and row >= 0:
-            targets = [(row, c) for c in range(self._template.cols)]
-        elif scope == "cell" and row >= 0 and col >= 0:
-            targets = [(row, col)]
-        else:
-            # default 全局 → 更新 default_style
-            existing = self._template.default_style.clone()
-            for attr, val in kwargs.items():
-                setattr(existing, attr, val)
-            self._template.default_style = existing
-            self._preview.refresh_all()
-            self._style_panel.set_current_selection(scope, row, col)
-            return
-
-        for r, c in targets:
-            existing = self._template.get_scope_style(StyleScope.CELL, r, c)
-            if existing is None:
-                existing = CellStyle()
-            existing = existing.clone()
-            for attr, val in kwargs.items():
-                setattr(existing, attr, val)
-            self._template.set_cell_style(r, c, existing)
-
-        self._preview.refresh_all()
-        self._style_panel.set_current_selection(scope, row, col)
-
-    def _on_tb_font_changed(self, font):
-        self._quick_apply_style(font_family=font.family())
-
-    def _on_tb_font_western_changed(self, font):
-        self._quick_apply_style(font_family_western=font.family())
-
-    def _on_tb_font_size_changed(self, val):
-        self._quick_apply_style(font_size=val)
-
-    def _on_tb_bold(self):
-        existing = self._get_existing_style()
-        current = existing.bold if existing else None
-        self._quick_apply_style(bold=not current if current else True)
-
-    def _on_tb_italic(self):
-        existing = self._get_existing_style()
-        current = existing.italic if existing else None
-        self._quick_apply_style(italic=not current if current else True)
-
-    def _on_tb_underline(self):
-        existing = self._get_existing_style()
-        current = existing.underline if existing else None
-        self._quick_apply_style(underline=not current if current else True)
-
-    def _on_tb_align_left(self):
-        self._quick_apply_style(alignment=int(Qt.AlignmentFlag.AlignLeft))
-
-    def _on_tb_align_center(self):
-        self._quick_apply_style(alignment=int(Qt.AlignmentFlag.AlignCenter))
-
-    def _on_tb_align_right(self):
-        self._quick_apply_style(alignment=int(Qt.AlignmentFlag.AlignRight))
-
-    def _on_tb_valign_top(self):
-        self._quick_apply_style(vertical_alignment=int(Qt.AlignmentFlag.AlignTop))
-
-    def _on_tb_valign_center(self):
-        self._quick_apply_style(vertical_alignment=int(Qt.AlignmentFlag.AlignVCenter))
-
-    def _on_tb_valign_bottom(self):
-        self._quick_apply_style(vertical_alignment=int(Qt.AlignmentFlag.AlignBottom))
-
-    def _on_tb_fg_color(self):
-        color = QColorDialog.getColor()
-        if color.isValid():
-            self._quick_apply_style(fg_color=color.name())
-
-    def _on_tb_bg_color(self):
-        color = QColorDialog.getColor(QColor("#FFFFFF"))
-        if color.isValid():
-            self._quick_apply_style(bg_color=color.name())
-
-    def _get_existing_style(self) -> CellStyle | None:
-        scope, row, col = self._preview.get_current_scope_info()
-        scope_enum = {"cell": StyleScope.CELL, "row": StyleScope.ROW,
-                       "column": StyleScope.COLUMN, "default": StyleScope.DEFAULT}[scope]
-        return self._template.get_scope_style(scope_enum, row, col)
 
     # ==================================================================
     # 撤销 / 恢复
     # ==================================================================
-    def _undo(self):
-        """撤销最近一次单元格文本编辑。"""
-        def _apply(row, col, text):
+    def _apply_undo_change(self, change: tuple, use_new: bool):
+        """应用/回滚一个 change。use_new=True 应用新值，False 恢复旧值。"""
+        kind = change[0]
+        if kind == "text":
+            _, row, col, old, new = change
+            text = new if use_new else old
             cd = self._template.get_cell_data(row, col)
             cd.static_text = text
             self._template.set_cell_data(row, col, cd)
-            self._preview.refresh_cell(row, col)
-            # 若当前公式栏正在编辑该单元格，同步内容
             if self._formula_bar._current_row == row and self._formula_bar._current_col == col:
                 self._formula_bar.set_current_cell(row, col, text)
-        if self._undo_mgr.undo(_apply):
+        elif kind == "style":
+            _, row, col, old_style, new_style = change
+            style = new_style if use_new else old_style
+            if style is None:
+                self._template.clear_cell_style(row, col)
+            else:
+                self._template.set_cell_style(row, col, style)
+            self._preview.refresh_cell(row, col)
+        elif kind == "row_style":
+            _, row, old, new = change
+            style = new if use_new else old
+            if style is None: self._template.clear_row_style(row)
+            else: self._template.set_row_style(row, style)
+        elif kind == "column_style":
+            _, col, old, new = change
+            style = new if use_new else old
+            if style is None: self._template.clear_column_style(col)
+            else: self._template.set_column_style(col, style)
+        elif kind == "default_style":
+            _, old, new = change
+            self._template.default_style = (new if use_new else old).clone()
+        elif kind == "merges":
+            _, old, new = change
+            self._template.merge_ranges = set(new if use_new else old)
+
+    def _undo(self):
+        """撤销一步（若为批量操作则整体撤销）。"""
+        changes = self._undo_mgr.undo()
+        if changes is None:
+            self._status_label.setText("没有可撤销的操作")
+            return
+        if len(changes) == 1 and changes[0][0] == "structure":
+            self._restore_template_dict(changes[0][1])
             self._status_label.setText("已撤销")
+            return
+        selected = self._preview.get_selected_cells()
+        current = (self._preview.currentRow(), self._preview.currentColumn())
+        for change in reversed(changes):
+            self._apply_undo_change(change, use_new=False)
+        self._preview.refresh_all()
+        self._preview.select_cells(selected, current)
+        self._status_label.setText("已撤销")
 
     def _redo(self):
-        """恢复最近一次撤销的编辑。"""
-        def _apply(row, col, text):
-            cd = self._template.get_cell_data(row, col)
-            cd.static_text = text
-            self._template.set_cell_data(row, col, cd)
-            self._preview.refresh_cell(row, col)
-            if self._formula_bar._current_row == row and self._formula_bar._current_col == col:
-                self._formula_bar.set_current_cell(row, col, text)
-        if self._undo_mgr.redo(_apply):
+        """恢复一步（若为批量操作则整体恢复）。"""
+        changes = self._undo_mgr.redo()
+        if changes is None:
+            self._status_label.setText("没有可恢复的操作")
+            return
+        if len(changes) == 1 and changes[0][0] == "structure":
+            self._restore_template_dict(changes[0][2])
             self._status_label.setText("已恢复")
+            return
+        selected = self._preview.get_selected_cells()
+        current = (self._preview.currentRow(), self._preview.currentColumn())
+        for change in changes:
+            self._apply_undo_change(change, use_new=True)
+        self._preview.refresh_all()
+        self._preview.select_cells(selected, current)
+        self._status_label.setText("已恢复")
+
+    def _restore_template_dict(self, d: dict):
+        """从字典快照恢复整个模板（用于行列等结构变更的撤销/恢复）。"""
+        self._template = TemplateModel.from_dict(d)
+        self._preview.set_template(self._template)
+        self._style_panel._template = self._template
+
+    # ==================================================================
+    # 复制 / 粘贴 / 格式拷贝 / 格式粘贴
+    # ==================================================================
+    def _copy(self):
+        """复制选中单元格的文本和格式到内部剪贴板（按选区最小包围盒）。"""
+        cells = self._preview.get_selected_cells_raw()
+        if not cells:
+            self._status_label.setText("未选中任何单元格")
+            return
+        min_r = min(r for r, _ in cells)
+        min_c = min(c for _, c in cells)
+        max_r = max(r for r, _ in cells)
+        max_c = max(c for _, c in cells)
+        cb_cells = {}
+        for r in range(min_r, max_r + 1):
+            for c in range(min_c, max_c + 1):
+                cd = self._template.get_cell_data(r, c)
+                text = cd.static_text if cd.static_text else ""
+                style = self._template.get_effective_style(r, c).clone()
+                cb_cells[(r - min_r, c - min_c)] = (text, style)
+        self._clipboard = {
+            "height": max_r - min_r + 1,
+            "width": max_c - min_c + 1,
+            "cells": cb_cells,
+            "merges": [
+                (mr.top_row - min_r, mr.bottom_row - min_r,
+                 mr.left_col - min_c, mr.right_col - min_c)
+                for mr in self._template.merge_ranges
+                if (mr.top_row >= min_r and mr.bottom_row <= max_r and
+                    mr.left_col >= min_c and mr.right_col <= max_c)
+            ],
+        }
+        rows = []
+        for dr in range(self._clipboard["height"]):
+            rows.append("\t".join(cb_cells[(dr, dc)][0]
+                                  for dc in range(self._clipboard["width"])))
+        self._clipboard_system_text = "\n".join(rows)
+        QApplication.clipboard().setText(self._clipboard_system_text)
+        self._preview.clear_paste_anchor()
+        self._status_label.setText(f"已复制 {len(cb_cells)} 个单元格")
+
+    def _copy_format(self):
+        """格式拷贝：只复制选中单元格的格式到格式剪贴板（不复制文本）。"""
+        cells = self._preview.get_selected_cells_raw()
+        if not cells:
+            self._status_label.setText("未选中任何单元格")
+            return
+        min_r = min(r for r, _ in cells)
+        min_c = min(c for _, c in cells)
+        max_r = max(r for r, _ in cells)
+        max_c = max(c for _, c in cells)
+        cb_cells = {}
+        for r in range(min_r, max_r + 1):
+            for c in range(min_c, max_c + 1):
+                cb_cells[(r - min_r, c - min_c)] = self._template.get_effective_style(r, c).clone()
+        self._format_clipboard = {
+            "height": max_r - min_r + 1,
+            "width": max_c - min_c + 1,
+            "cells": cb_cells,
+            "merges": [
+                (mr.top_row - min_r, mr.bottom_row - min_r,
+                 mr.left_col - min_c, mr.right_col - min_c)
+                for mr in self._template.merge_ranges
+                if (mr.top_row >= min_r and mr.bottom_row <= max_r and
+                    mr.left_col >= min_c and mr.right_col <= max_c)
+            ],
+        }
+        self._status_label.setText(f"已拷贝格式（{len(cb_cells)} 个单元格）")
+
+    def _paste_anchor(self):
+        """确定粘贴起始位置；单格选择时优先使用刚点击的当前格。"""
+        clicked = self._preview.paste_anchor_cell()
+        if clicked is not None:
+            return clicked
+        cells = self._preview.get_selected_cells()
+        if len(cells) <= 1:
+            row, col = self._preview.currentRow(), self._preview.currentColumn()
+            if row >= 0 and col >= 0:
+                mr = self._template.get_merge_range(row, col)
+                return (mr.top_row, mr.left_col) if mr else (row, col)
+        if cells:
+            return min(r for r, _ in cells), min(c for _, c in cells)
+        scope, row, col = self._preview.get_current_scope_info()
+        if row >= 0 and col >= 0:
+            return row, col
+        return 0, 0
+
+    @staticmethod
+    def _clipboard_from_text(text: str) -> dict | None:
+        """把 Excel/WPS 系统剪贴板的 TSV 文本转换为二维剪贴板。"""
+        if not text:
+            return None
+        lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        if not lines:
+            return None
+        matrix = [line.split("\t") for line in lines]
+        width = max(len(row) for row in matrix)
+        cells = {}
+        for r, row in enumerate(matrix):
+            for c in range(width):
+                cells[(r, c)] = (row[c] if c < len(row) else "", None)
+        return {"height": len(matrix), "width": width, "cells": cells, "merges": []}
+
+    def _active_clipboard(self) -> dict | None:
+        system_text = QApplication.clipboard().text()
+        if system_text and system_text != self._clipboard_system_text:
+            return self._clipboard_from_text(system_text)
+        return self._clipboard
+
+    def _paste_mapping(self, clipboard: dict) -> list[tuple[int, int, int, int]] | None:
+        """返回 (目标行,目标列,源相对行,源相对列)，遵循 Excel 矩形粘贴规则。"""
+        selected = self._preview.get_selected_cells()
+        source_h, source_w = clipboard["height"], clipboard["width"]
+        clicked = self._preview.paste_anchor_cell()
+        if clicked is not None:
+            start_r, start_c = clicked
+            return [(start_r + dr, start_c + dc, dr, dc)
+                    for dr in range(source_h) for dc in range(source_w)
+                    if start_r + dr < self._template.rows and start_c + dc < self._template.cols]
+        if len(selected) <= 1:
+            start_r, start_c = self._paste_anchor()
+            return [(start_r + dr, start_c + dc, dr, dc)
+                    for dr in range(source_h) for dc in range(source_w)
+                    if start_r + dr < self._template.rows and start_c + dc < self._template.cols]
+
+        selected_set = set(selected)
+        min_r = min(r for r, _ in selected); max_r = max(r for r, _ in selected)
+        min_c = min(c for _, c in selected); max_c = max(c for _, c in selected)
+        target_h, target_w = max_r - min_r + 1, max_c - min_c + 1
+        if source_h != 1 or source_w != 1:
+            if target_h % source_h or target_w % source_w:
+                return None
+        return [(r, c, (r - min_r) % source_h, (c - min_c) % source_w)
+                for r, c in sorted(selected_set)]
+
+    def _paste_from_clipboard(self, clipboard: dict, paste_text: bool, paste_style: bool):
+        mapping = self._paste_mapping(clipboard)
+        if mapping is None:
+            QMessageBox.warning(self, "无法粘贴",
+                                "复制区域与粘贴区域的大小不同，且目标区域不是源区域的整数倍。")
+            return
+        changes, affected = [], []
+        old_merges = set(self._template.merge_ranges)
+        for tr, tc, sr, sc in mapping:
+            if tr >= self._template.rows or tc >= self._template.cols:
+                continue
+            text, style = clipboard["cells"][(sr, sc)]
+            if paste_text:
+                cd = self._template.get_cell_data(tr, tc)
+                old_text = cd.static_text or ""
+                if old_text != text:
+                    changes.append(("text", tr, tc, old_text, text))
+                    cd.static_text = text
+                    self._template.set_cell_data(tr, tc, cd)
+            if paste_style and style is not None:
+                old_style = self._template.cell_styles.get((tr, tc))
+                old_copy = old_style.clone() if old_style else None
+                new_style = style.clone()
+                if old_copy != new_style:
+                    changes.append(("style", tr, tc, old_copy, new_style))
+                    self._template.set_cell_style(tr, tc, new_style)
+            affected.append((tr, tc))
+        if paste_style and clipboard.get("merges") and affected:
+            min_r = min(r for r, _ in affected); min_c = min(c for _, c in affected)
+            source_h, source_w = clipboard["height"], clipboard["width"]
+            target_h = max(r for r, _ in affected) - min_r + 1
+            target_w = max(c for _, c in affected) - min_c + 1
+            for tile_r in range(0, target_h, source_h):
+                for tile_c in range(0, target_w, source_w):
+                    for top, bottom, left, right in clipboard["merges"]:
+                        t, b = min_r + tile_r + top, min_r + tile_r + bottom
+                        l, rr = min_c + tile_c + left, min_c + tile_c + right
+                        if b < self._template.rows and rr < self._template.cols:
+                            self._template.add_merge_range(t, b, l, rr)
+            if old_merges != self._template.merge_ranges:
+                changes.append(("merges", old_merges, set(self._template.merge_ranges)))
+        self._undo_mgr.record_batch(changes)
+        self._preview.refresh_all()
+        self._preview.select_cells(affected, affected[0] if affected else None)
+        self._status_label.setText(f"已粘贴到 {len(affected)} 个单元格")
+
+    def _paste(self):
+        """粘贴剪贴板内容（文本 + 格式）到当前选区。"""
+        clipboard = self._active_clipboard()
+        if not clipboard:
+            self._status_label.setText("剪贴板为空")
+            return
+        self._paste_from_clipboard(clipboard, paste_text=True, paste_style=True)
+
+    def _paste_values(self):
+        """仅粘贴内容，支持来自 Excel/WPS 的 TSV 数据。"""
+        clipboard = self._active_clipboard()
+        if not clipboard:
+            self._status_label.setText("剪贴板为空")
+            return
+        self._paste_from_clipboard(clipboard, paste_text=True, paste_style=False)
+
+    def _paste_format(self):
+        """格式粘贴：只粘贴格式剪贴板中的格式，不改变文本。"""
+        if not self._format_clipboard:
+            self._status_label.setText("格式剪贴板为空，请先格式拷贝")
+            return
+        clipboard = {
+            "height": self._format_clipboard["height"],
+            "width": self._format_clipboard["width"],
+            "cells": {pos: ("", style) for pos, style in self._format_clipboard["cells"].items()},
+            "merges": self._format_clipboard.get("merges", []),
+        }
+        self._paste_from_clipboard(clipboard, paste_text=False, paste_style=True)
 
     # ==================================================================
     # 文件操作
@@ -894,6 +1062,7 @@ class MainWindow(QMainWindow):
         self._preview.set_template(self._template)
         self._style_panel._template = self._template
         self._status_label.setText(f"已加载: {name}")
+        self._refresh_query_results()
 
     # ==================================================================
     # 导入导出
@@ -938,6 +1107,12 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            # 若存在查询绑定，确保数据库已连接
+            if not self._db_handler.is_connected("default"):
+                config = self._template.db_configs.get("default")
+                if config:
+                    self._db_handler.connect(config, "default")
+
             # 准备数据（优先使用 cell_data 中的 static_text）
             data = self._preview.get_data()
 
@@ -972,7 +1147,11 @@ class MainWindow(QMainWindow):
 
         rows = [c[0] for c in cells]
         cols = [c[1] for c in cells]
+        old_merges = set(self._template.merge_ranges)
         self._template.add_merge_range(min(rows), max(rows), min(cols), max(cols))
+        new_merges = set(self._template.merge_ranges)
+        if old_merges != new_merges:
+            self._undo_mgr.record_batch([("merges", old_merges, new_merges)])
         self._preview.refresh_all()
         self._status_label.setText(f"已合并单元格: {min(rows)+1}:{max(rows)+1}, {chr(65+min(cols))}:{chr(65+max(cols))}")
 
@@ -981,37 +1160,49 @@ class MainWindow(QMainWindow):
         cells = self._preview.get_selected_cells()
         if not cells:
             return
+        old_merges = set(self._template.merge_ranges)
         for row, col in cells:
             self._template.remove_merge_range(row, col)
+        new_merges = set(self._template.merge_ranges)
+        if old_merges != new_merges:
+            self._undo_mgr.record_batch([("merges", old_merges, new_merges)])
         self._preview.refresh_all()
         self._status_label.setText("已取消合并")
 
     def _insert_row(self):
         cells = self._preview.get_selected_cells()
         target = cells[0][0] if cells else 0
+        old_dict = self._template.to_dict()
         self._template.insert_row(target)
         self._preview.sync_grid()
+        self._undo_mgr.record_batch([("structure", old_dict, self._template.to_dict())])
         self._status_label.setText(f"已在第 {target + 1} 行前插入一行")
 
     def _delete_row(self):
         cells = self._preview.get_selected_cells()
         target = cells[0][0] if cells else 0
+        old_dict = self._template.to_dict()
         self._template.delete_row(target)
         self._preview.sync_grid()
+        self._undo_mgr.record_batch([("structure", old_dict, self._template.to_dict())])
         self._status_label.setText(f"已删除第 {target + 1} 行")
 
     def _insert_column(self):
         cells = self._preview.get_selected_cells()
         target = cells[0][1] if cells else 0
+        old_dict = self._template.to_dict()
         self._template.insert_column(target)
         self._preview.sync_grid()
+        self._undo_mgr.record_batch([("structure", old_dict, self._template.to_dict())])
         self._status_label.setText(f"已在列 {chr(65 + target)} 前插入一列")
 
     def _delete_column(self):
         cells = self._preview.get_selected_cells()
         target = cells[0][1] if cells else 0
+        old_dict = self._template.to_dict()
         self._template.delete_column(target)
         self._preview.sync_grid()
+        self._undo_mgr.record_batch([("structure", old_dict, self._template.to_dict())])
         self._status_label.setText(f"已删除列 {chr(65 + target)}")
 
     # ==================================================================
@@ -1036,6 +1227,27 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "连接成功", "数据库连接测试通过")
         else:
             QMessageBox.critical(self, "连接失败", "数据库连接测试失败，请检查配置")
+
+    def _refresh_query_results(self):
+        """执行所有数据库绑定单元格的查询，更新预览显示结果。"""
+        if not self._db_handler.is_connected("default"):
+            # 尝试用已保存配置自动连接
+            config = self._template.db_configs.get("default")
+            if config:
+                self._db_handler.connect(config, "default")
+        results = {}
+        for (r, c), cd in self._template.cell_data.items():
+            qb = cd.query_binding
+            if not qb or not qb.enabled:
+                continue
+            sql = qb.build_sql(str(self._session.selected_date or date.today()))
+            if not sql:
+                continue
+            val = self._db_handler.execute_query(sql, qb.db_config_key or "default")
+            if val is not None:
+                results[(r, c)] = val
+        self._preview.set_query_results(results)
+        self._status_label.setText(f"已刷新查询结果（{len(results)} 个单元格）")
 
     # ==================================================================
     # 重置模板

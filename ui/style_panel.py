@@ -17,7 +17,9 @@ from PyQt6.QtGui import QColor, QFontDatabase
 from models.template_model import (
     TemplateModel, CellStyle, StyleScope, BorderStyle, NumberFormat, CellData,
 )
-from models.db_config import QueryBinding, QueryType
+from models.db_config import (
+    QueryBinding, QueryType, SQL_OPERATORS, SQL_OPERATOR_LABELS, parse_sql_to_binding,
+)
 
 
 _SCOPE_MAP = {
@@ -32,6 +34,7 @@ class StylePanel(QScrollArea):
     """可滚动的样式配置面板，使用 QToolBox 实现三组折叠。"""
 
     style_changed = pyqtSignal()  # 通知外部刷新预览
+    style_transaction = pyqtSignal(object)  # 一次可撤销的批量样式变更
 
     def __init__(self, template: TemplateModel, parent=None):
         super().__init__(parent)
@@ -179,11 +182,7 @@ class StylePanel(QScrollArea):
         self._btn_fg_color.setFixedSize(28, 28)
         self._btn_fg_color.setStyleSheet("background-color:#000000; border:1px solid #999; border-radius:3px;")
         self._btn_fg_color.clicked.connect(self._on_fg_color_clicked)
-        self._chk_fg_reset = QCheckBox("默认")
-        self._chk_fg_reset.setChecked(True)
-        self._chk_fg_reset.stateChanged.connect(self._on_fg_reset_changed)
         cr1.addWidget(self._btn_fg_color)
-        cr1.addWidget(self._chk_fg_reset)
         cr1.addStretch()
         cl.addLayout(cr1)
 
@@ -193,11 +192,7 @@ class StylePanel(QScrollArea):
         self._btn_bg_color.setFixedSize(28, 28)
         self._btn_bg_color.setStyleSheet("background-color:#FFFFFF; border:1px solid #999; border-radius:3px;")
         self._btn_bg_color.clicked.connect(self._on_bg_color_clicked)
-        self._chk_bg_reset = QCheckBox("默认")
-        self._chk_bg_reset.setChecked(True)
-        self._chk_bg_reset.stateChanged.connect(self._on_bg_reset_changed)
         cr2.addWidget(self._btn_bg_color)
-        cr2.addWidget(self._chk_bg_reset)
         cr2.addStretch()
         cl.addLayout(cr2)
         lay.addWidget(color_grp)
@@ -331,68 +326,111 @@ class StylePanel(QScrollArea):
         self._chk_db_enabled.stateChanged.connect(self._on_db_enabled_changed)
         lay.addWidget(self._chk_db_enabled)
 
-        # 查询类型
+        # 编写方式
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("编写方式:"))
+        self._cmb_sql_mode = QComboBox()
+        self._cmb_sql_mode.addItems(["条件构建", "手动 SQL"])
+        self._cmb_sql_mode.currentIndexChanged.connect(self._on_sql_mode_changed)
+        mode_row.addWidget(self._cmb_sql_mode, 1)
+        lay.addLayout(mode_row)
+
+        # 条件构建模式容器
+        self._builder_widget = QWidget()
+        bl = QVBoxLayout(self._builder_widget)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(4)
+
         qt_row = QHBoxLayout()
         qt_row.addWidget(QLabel("查询类型:"))
         self._cmb_query_type = QComboBox()
         self._cmb_query_type.addItems(["单值查询", "聚合查询"])
         self._cmb_query_type.currentIndexChanged.connect(self._on_db_config_changed)
         qt_row.addWidget(self._cmb_query_type, 1)
-        lay.addLayout(qt_row)
+        bl.addLayout(qt_row)
 
-        # 聚合函数
         agg_row = QHBoxLayout()
         agg_row.addWidget(QLabel("聚合:"))
         self._cmb_aggregate = QComboBox()
         self._cmb_aggregate.addItems(["SUM", "COUNT", "AVG", "MAX", "MIN"])
         self._cmb_aggregate.currentIndexChanged.connect(self._on_db_config_changed)
         agg_row.addWidget(self._cmb_aggregate, 1)
-        lay.addLayout(agg_row)
+        bl.addLayout(agg_row)
 
-        # 数据表
         tbl_row = QHBoxLayout()
         tbl_row.addWidget(QLabel("数据表:"))
         self._txt_table = QLineEdit()
         self._txt_table.setPlaceholderText("如: daily_production")
         self._txt_table.textChanged.connect(self._on_db_config_changed)
         tbl_row.addWidget(self._txt_table, 1)
-        lay.addLayout(tbl_row)
+        bl.addLayout(tbl_row)
 
-        # 字段
         fld_row = QHBoxLayout()
         fld_row.addWidget(QLabel("字段:"))
         self._txt_field = QLineEdit()
         self._txt_field.setPlaceholderText("如: output_volume")
         self._txt_field.textChanged.connect(self._on_db_config_changed)
         fld_row.addWidget(self._txt_field, 1)
-        lay.addLayout(fld_row)
+        bl.addLayout(fld_row)
 
-        # 日期占位符
         dp_row = QHBoxLayout()
         dp_row.addWidget(QLabel("日期占位符:"))
         self._txt_date_ph = QLineEdit()
         self._txt_date_ph.setPlaceholderText("如: {date}")
         self._txt_date_ph.textChanged.connect(self._on_db_config_changed)
         dp_row.addWidget(self._txt_date_ph, 1)
-        lay.addLayout(dp_row)
+        bl.addLayout(dp_row)
 
-        # 筛选条件
-        lay.addWidget(QLabel("筛选条件 (每行一个, 格式: 字段 运算符 值):"))
-        self._txt_filters = QTextEdit()
-        self._txt_filters.setFixedHeight(80)
-        self._txt_filters.setPlaceholderText("例如:\ndate = {date}\nstation_id = 001")
-        self._txt_filters.textChanged.connect(self._on_db_config_changed)
-        lay.addWidget(self._txt_filters)
+        bl.addWidget(QLabel("筛选条件 (where / and / or):"))
+        self._filters_container = QWidget()
+        self._filters_layout = QVBoxLayout(self._filters_container)
+        self._filters_layout.setContentsMargins(0, 0, 0, 0)
+        self._filters_layout.setSpacing(2)
+        bl.addWidget(self._filters_container)
 
-        # 预览 SQL
-        lay.addWidget(QLabel("预览 SQL:"))
+        btn_row = QHBoxLayout()
+        btn_add = QPushButton("+ 条件")
+        btn_add.clicked.connect(self._add_filter_row)
+        btn_del = QPushButton("- 条件")
+        btn_del.clicked.connect(self._remove_filter_row)
+        btn_row.addWidget(btn_add)
+        btn_row.addWidget(btn_del)
+        btn_row.addStretch()
+        bl.addLayout(btn_row)
+
+        lay.addWidget(self._builder_widget)
+
+        # 手动 SQL 模式容器
+        self._manual_widget = QWidget()
+        ml = QVBoxLayout(self._manual_widget)
+        ml.setContentsMargins(0, 0, 0, 0)
+        ml.addWidget(QLabel("SQL 语句:"))
+        self._txt_custom_sql = QTextEdit()
+        self._txt_custom_sql.setFixedHeight(100)
+        self._txt_custom_sql.setPlaceholderText("SELECT ... FROM ... WHERE ...")
+        self._txt_custom_sql.textChanged.connect(self._on_manual_sql_changed)
+        ml.addWidget(self._txt_custom_sql)
+        lay.addWidget(self._manual_widget)
+
+        # SQL 预览（互通）
+        lay.addWidget(QLabel("SQL 预览:"))
         self._lbl_sql_preview = QLabel("-")
         self._lbl_sql_preview.setWordWrap(True)
         self._lbl_sql_preview.setStyleSheet("background:#F8F9FC; padding:4px; border-radius:3px; border:1px solid #E0E3E8;")
         lay.addWidget(self._lbl_sql_preview)
 
+        # 验证提示
+        self._lbl_sql_validate = QLabel("")
+        self._lbl_sql_validate.setWordWrap(True)
+        lay.addWidget(self._lbl_sql_validate)
+
         lay.addStretch()
         self._toolbox.addItem(page, "🗄️  数据库绑定")
+
+        # 初始化条件行
+        self._filter_rows: list[dict] = []
+        self._add_filter_row()
+        self._on_sql_mode_changed(0)
 
     # ==================================================================
     # 应用范围按钮
@@ -544,23 +582,19 @@ class StylePanel(QScrollArea):
             self._btn_fg_color.setStyleSheet(
                 f"background-color:{style.fg_color}; border:1px solid #999; border-radius:3px;"
             )
-            self._chk_fg_reset.setChecked(False)
         else:
             self._btn_fg_color.setStyleSheet(
                 "background-color:#000000; border:1px solid #999; border-radius:3px;"
             )
-            self._chk_fg_reset.setChecked(True)
 
         if style.bg_color:
             self._btn_bg_color.setStyleSheet(
                 f"background-color:{style.bg_color}; border:1px solid #999; border-radius:3px;"
             )
-            self._chk_bg_reset.setChecked(False)
         else:
             self._btn_bg_color.setStyleSheet(
                 "background-color:#FFFFFF; border:1px solid #999; border-radius:3px;"
             )
-            self._chk_bg_reset.setChecked(True)
 
         # 边框线型
         border_style_map = {
@@ -634,12 +668,17 @@ class StylePanel(QScrollArea):
         """加载数据库绑定信息到第二组面板。"""
         if self._current_row < 0 or self._current_col < 0:
             return
+        self._suppress_update = True
         cd = self._template.get_cell_data(self._current_row, self._current_col)
         qb = cd.query_binding or QueryBinding()
 
         self._chk_db_enabled.blockSignals(True)
         self._chk_db_enabled.setChecked(qb.enabled)
         self._chk_db_enabled.blockSignals(False)
+
+        self._cmb_sql_mode.blockSignals(True)
+        self._cmb_sql_mode.setCurrentIndex(1 if qb.sql_mode == "manual" else 0)
+        self._cmb_sql_mode.blockSignals(False)
 
         self._cmb_query_type.blockSignals(True)
         self._cmb_query_type.setCurrentIndex(0 if qb.query_type == QueryType.SINGLE else 1)
@@ -663,16 +702,30 @@ class StylePanel(QScrollArea):
         self._txt_date_ph.setText(qb.date_placeholder)
         self._txt_date_ph.blockSignals(False)
 
-        self._txt_filters.blockSignals(True)
-        if qb.filters:
-            filter_lines = []
-            for f in qb.filters:
-                filter_lines.append(f"{f.get('field','')} {f.get('op','=')} {f.get('value','')}")
-            self._txt_filters.setPlainText("\n".join(filter_lines))
-        else:
-            self._txt_filters.clear()
-        self._txt_filters.blockSignals(False)
+        self._txt_custom_sql.blockSignals(True)
+        self._txt_custom_sql.setPlainText(qb.custom_sql)
+        self._txt_custom_sql.blockSignals(False)
 
+        # 重建条件行
+        self._clear_filter_rows()
+        for f in (qb.filters or []):
+            self._add_filter_row()
+            fr = self._filter_rows[-1]
+            fr["field"].setText(f.get("field", ""))
+            op = f.get("op", "=")
+            if op in SQL_OPERATORS:
+                fr["op"].setCurrentIndex(SQL_OPERATORS.index(op))
+            fr["value"].setText(f.get("value", ""))
+            if len(self._filter_rows) > 1:
+                conn = f.get("connector", "and")
+                cidx = fr["connector"].findText(conn)
+                if cidx >= 0:
+                    fr["connector"].setCurrentIndex(cidx)
+        if not self._filter_rows:
+            self._add_filter_row()
+
+        self._suppress_update = False
+        self._on_sql_mode_changed(self._cmb_sql_mode.currentIndex())
         self._update_sql_preview()
 
     def _get_current_style(self):
@@ -723,52 +776,79 @@ class StylePanel(QScrollArea):
         if self._suppress_update:
             return
 
+        changes = []
+
         # 多单元格选中 → 每个单元格分别 merge
         if len(self._selected_cells) > 1:
             for r, c in self._selected_cells:
-                existing = self._template.cell_styles.get((r, c), CellStyle())
-                self._template.set_cell_style(r, c, existing.merge(style))
+                old = self._template.cell_styles.get((r, c))
+                old_copy = old.clone() if old else None
+                new = (old or CellStyle()).merge(style)
+                if old_copy != new:
+                    self._template.set_cell_style(r, c, new)
+                    changes.append(("style", r, c, old_copy, new.clone()))
         elif self._current_scope == StyleScope.DEFAULT:
-            self._template.default_style = self._template.default_style.merge(style)
+            old = self._template.default_style.clone()
+            new = old.merge(style)
+            if old != new:
+                self._template.default_style = new
+                changes.append(("default_style", old, new.clone()))
         elif self._current_scope == StyleScope.COLUMN and self._current_col >= 0:
-            existing = self._template.column_styles.get(self._current_col, CellStyle())
-            self._template.set_column_style(self._current_col, existing.merge(style))
+            old = self._template.column_styles.get(self._current_col)
+            old_copy = old.clone() if old else None
+            new = (old or CellStyle()).merge(style)
+            if old_copy != new:
+                self._template.set_column_style(self._current_col, new)
+                changes.append(("column_style", self._current_col, old_copy, new.clone()))
         elif self._current_scope == StyleScope.ROW and self._current_row >= 0:
-            existing = self._template.row_styles.get(self._current_row, CellStyle())
-            self._template.set_row_style(self._current_row, existing.merge(style))
+            old = self._template.row_styles.get(self._current_row)
+            old_copy = old.clone() if old else None
+            new = (old or CellStyle()).merge(style)
+            if old_copy != new:
+                self._template.set_row_style(self._current_row, new)
+                changes.append(("row_style", self._current_row, old_copy, new.clone()))
         elif self._current_scope == StyleScope.CELL and self._current_row >= 0 and self._current_col >= 0:
-            existing = self._template.cell_styles.get((self._current_row, self._current_col), CellStyle())
-            self._template.set_cell_style(self._current_row, self._current_col, existing.merge(style))
+            old = self._template.cell_styles.get((self._current_row, self._current_col))
+            old_copy = old.clone() if old else None
+            new = (old or CellStyle()).merge(style)
+            if old_copy != new:
+                self._template.set_cell_style(self._current_row, self._current_col, new)
+                changes.append(("style", self._current_row, self._current_col, old_copy, new.clone()))
 
+        if changes:
+            self.style_transaction.emit(changes)
         self.style_changed.emit()
 
     def _collect_db_binding(self) -> QueryBinding:
         """从第二组面板收集数据库绑定。"""
         qb = QueryBinding()
         qb.enabled = self._chk_db_enabled.isChecked()
+        qb.sql_mode = "manual" if self._cmb_sql_mode.currentIndex() == 1 else "builder"
         qb.query_type = QueryType.SINGLE if self._cmb_query_type.currentIndex() == 0 else QueryType.AGGREGATE
         qb.aggregate_func = self._cmb_aggregate.currentText()
         qb.table_name = self._txt_table.text().strip()
         qb.field_name = self._txt_field.text().strip()
         qb.date_placeholder = self._txt_date_ph.text().strip()
+        qb.custom_sql = self._txt_custom_sql.toPlainText().strip()
 
-        # 解析筛选条件
+        # 收集条件行
         filters = []
-        for line in self._txt_filters.toPlainText().strip().split("\n"):
-            line = line.strip()
-            if not line:
+        for i, fr in enumerate(self._filter_rows):
+            field = fr["field"].text().strip()
+            value = fr["value"].text().strip()
+            if not field and not value:
                 continue
-            parts = line.split(" ", 2)
-            if len(parts) >= 3:
-                filters.append({"field": parts[0], "op": parts[1], "value": parts[2]})
-            elif len(parts) == 2:
-                filters.append({"field": parts[0], "op": "=", "value": parts[1]})
+            op = SQL_OPERATORS[fr["op"].currentIndex()]
+            connector = "where" if i == 0 else fr["connector"].currentText()
+            filters.append({"connector": connector, "field": field, "op": op, "value": value})
         qb.filters = filters
 
         return qb
 
     def _apply_db_binding(self):
         """将数据库绑定写入模板。"""
+        if self._suppress_update:
+            return
         if self._current_row < 0 or self._current_col < 0:
             return
         cd = self._template.get_cell_data(self._current_row, self._current_col)
@@ -776,10 +856,38 @@ class StylePanel(QScrollArea):
         self._template.set_cell_data(self._current_row, self._current_col, cd)
         self._update_sql_preview()
 
+    def _validate_sql(self, sql: str) -> str:
+        """简单校验 SQL，返回错误信息（空字符串表示正确）。"""
+        if not sql:
+            return "SQL 为空"
+        upper = sql.upper().strip()
+        if not upper.startswith("SELECT"):
+            return "SQL 必须以 SELECT 开头"
+        if sql.count("(") != sql.count(")"):
+            return "括号不匹配"
+        if " FROM " not in upper:
+            return "缺少 FROM 子句"
+        return ""
+
     def _update_sql_preview(self):
         qb = self._collect_db_binding()
+        if not qb.enabled:
+            self._lbl_sql_preview.setText("（未启用数据库绑定）")
+            self._lbl_sql_validate.setText("")
+            return
         sql = qb.build_sql("2026-01-01")
-        self._lbl_sql_preview.setText(sql if sql else "-")
+        if not sql:
+            self._lbl_sql_preview.setText("（请填写字段/数据表或 SQL 语句）")
+            self._lbl_sql_validate.setText("")
+            return
+        self._lbl_sql_preview.setText(sql)
+        err = self._validate_sql(sql)
+        if err:
+            self._lbl_sql_validate.setText(f"⚠ {err}")
+            self._lbl_sql_validate.setStyleSheet("color:#D93025;")
+        else:
+            self._lbl_sql_validate.setText("✓ SQL 语法正确")
+            self._lbl_sql_validate.setStyleSheet("color:#188038;")
 
     # ------------------------------------------------------------------
     # 信号槽
@@ -836,9 +944,6 @@ class StylePanel(QScrollArea):
             self._btn_fg_color.setStyleSheet(
                 f"background-color:{color.name()}; border:1px solid #999; border-radius:3px;"
             )
-            self._chk_fg_reset.blockSignals(True)
-            self._chk_fg_reset.setChecked(False)
-            self._chk_fg_reset.blockSignals(False)
             self._apply_style(CellStyle(fg_color=color.name()))
 
     def _on_bg_color_clicked(self):
@@ -847,24 +952,7 @@ class StylePanel(QScrollArea):
             self._btn_bg_color.setStyleSheet(
                 f"background-color:{color.name()}; border:1px solid #999; border-radius:3px;"
             )
-            self._chk_bg_reset.blockSignals(True)
-            self._chk_bg_reset.setChecked(False)
-            self._chk_bg_reset.blockSignals(False)
             self._apply_style(CellStyle(bg_color=color.name()))
-
-    def _on_fg_reset_changed(self, state):
-        if state == Qt.CheckState.Checked.value:
-            self._btn_fg_color.setStyleSheet(
-                "background-color:#000000; border:1px solid #999; border-radius:3px;"
-            )
-            self._apply_style(CellStyle(fg_color=""))
-
-    def _on_bg_reset_changed(self, state):
-        if state == Qt.CheckState.Checked.value:
-            self._btn_bg_color.setStyleSheet(
-                "background-color:#FFFFFF; border:1px solid #999; border-radius:3px;"
-            )
-            self._apply_style(CellStyle(bg_color=""))
 
     def _current_border_line_style(self) -> str:
         border_styles = ["solid", "dashed", "dotted", "dash_dot", "double", "none"]
@@ -974,6 +1062,119 @@ class StylePanel(QScrollArea):
 
     def _on_db_config_changed(self):
         self._apply_db_binding()
+
+    def _on_manual_sql_changed(self):
+        self._apply_db_binding()
+
+    # ------------------------------------------------------------------
+    # 条件构建器
+    # ------------------------------------------------------------------
+    def _add_filter_row(self):
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(2)
+
+        connector = QComboBox()
+        connector.setFixedWidth(52)
+        if not self._filter_rows:
+            connector.addItems(["where"])
+            connector.setEnabled(False)
+        else:
+            connector.addItems(["and", "or"])
+
+        field = QLineEdit()
+        field.setPlaceholderText("字段")
+
+        op = QComboBox()
+        op.addItems([SQL_OPERATOR_LABELS[o] for o in SQL_OPERATORS])
+        op.setFixedWidth(72)
+
+        value = QLineEdit()
+        value.setPlaceholderText("值")
+
+        h.addWidget(connector)
+        h.addWidget(field, 1)
+        h.addWidget(op)
+        h.addWidget(value, 1)
+
+        self._filters_layout.addWidget(row)
+        self._filter_rows.append(
+            {"widget": row, "connector": connector, "field": field, "op": op, "value": value}
+        )
+
+        field.textChanged.connect(self._on_db_config_changed)
+        op.currentIndexChanged.connect(self._on_db_config_changed)
+        value.textChanged.connect(self._on_db_config_changed)
+
+    def _remove_filter_row(self):
+        if len(self._filter_rows) <= 1:
+            return
+        fr = self._filter_rows.pop()
+        fr["widget"].deleteLater()
+        self._on_db_config_changed()
+
+    def _clear_filter_rows(self):
+        for fr in self._filter_rows:
+            fr["widget"].deleteLater()
+        self._filter_rows.clear()
+
+    def _parse_sql_to_filters(self, sql: str):
+        """手动 SQL → 条件构建器（反向互通）。"""
+        info = parse_sql_to_binding(sql)
+        if not info.get("field") and not info.get("filters"):
+            return
+        self._txt_table.blockSignals(True)
+        self._txt_table.setText(info.get("table", ""))
+        self._txt_table.blockSignals(False)
+        self._txt_field.blockSignals(True)
+        self._txt_field.setText(info.get("field", ""))
+        self._txt_field.blockSignals(False)
+        agg = info.get("aggregate", "")
+        if agg:
+            idx = self._cmb_aggregate.findText(agg)
+            if idx >= 0:
+                self._cmb_aggregate.setCurrentIndex(idx)
+            self._cmb_query_type.setCurrentIndex(1)
+        else:
+            self._cmb_query_type.setCurrentIndex(0)
+
+        self._clear_filter_rows()
+        for f in info.get("filters", []):
+            self._add_filter_row()
+            fr = self._filter_rows[-1]
+            fr["field"].setText(f.get("field", ""))
+            op = f.get("op", "=")
+            if op in SQL_OPERATORS:
+                fr["op"].setCurrentIndex(SQL_OPERATORS.index(op))
+            fr["value"].setText(f.get("value", ""))
+        if not self._filter_rows:
+            self._add_filter_row()
+
+    def _on_sql_mode_changed(self, idx: int):
+        """切换编写方式，并在两种方式之间互通。"""
+        mode = "manual" if idx == 1 else "builder"
+        if mode == "manual":
+            self._builder_widget.hide()
+            self._manual_widget.show()
+            # 条件构建 → 手动 SQL：自动生成 SQL 填入（若手动框为空）
+            if not self._txt_custom_sql.toPlainText().strip():
+                qb = self._collect_db_binding()
+                qb.sql_mode = "builder"
+                sql = qb.build_sql("2026-01-01")
+                if sql:
+                    self._txt_custom_sql.blockSignals(True)
+                    self._txt_custom_sql.setPlainText(sql)
+                    self._txt_custom_sql.blockSignals(False)
+        else:
+            self._manual_widget.hide()
+            self._builder_widget.show()
+            # 手动 SQL → 条件构建：解析 SQL 填充条件
+            sql = self._txt_custom_sql.toPlainText().strip()
+            if sql:
+                self._parse_sql_to_filters(sql)
+        if not self._suppress_update:
+            self._update_sql_preview()
 
     def _on_apply_clicked(self):
         btn = self.sender()

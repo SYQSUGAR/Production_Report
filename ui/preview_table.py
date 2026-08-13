@@ -2,10 +2,10 @@
 
 from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QStyledItemDelegate, QStyle, QApplication,
+    QStyledItemDelegate, QStyle, QApplication, QTableWidgetSelectionRange,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSignalBlocker
-from PyQt6.QtGui import QColor, QFont, QBrush, QPen, QPainter
+from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSignalBlocker, QItemSelectionModel
+from PyQt6.QtGui import QColor, QFont, QBrush, QPen, QPainter, QKeySequence
 
 from models.template_model import TemplateModel, StyleScope, MergeRange, CellData
 
@@ -74,6 +74,10 @@ class PreviewTable(QTableWidget):
     cells_selected = pyqtSignal(list)  # [(row,col), ...]
     cell_edited = pyqtSignal(int, int, str)  # row, col, new_text
     zoom_changed = pyqtSignal(int)  # zoom level %
+    copy_requested = pyqtSignal()
+    paste_requested = pyqtSignal()
+    undo_requested = pyqtSignal()
+    redo_requested = pyqtSignal()
 
     def __init__(self, template: TemplateModel, is_admin: bool = True, parent=None):
         super().__init__(parent)
@@ -83,6 +87,10 @@ class PreviewTable(QTableWidget):
         self._zoom: int = 100  # 缩放百分比
         self._base_font_size: int = 10  # 基准字号
         self._base_row_height: int = 36  # 基准行高
+        self._mouse_press_cell: tuple[int, int] | None = None
+        self._mouse_dragged = False
+        self._paste_anchor_cell: tuple[int, int] | None = None
+        self._query_results: dict[tuple[int, int], str] = {}
         self._init_data()
         self._setup_ui()
         self._connect_signals()
@@ -135,12 +143,21 @@ class PreviewTable(QTableWidget):
         self.setAlternatingRowColors(False)
         # 默认网格线会与自定义边框叠加并掩盖线型，边框完全交给委托绘制。
         self.setShowGrid(False)
-        self.setStyleSheet("QTableView::item { border: none; padding: 1px; }")
+        self.setStyleSheet("""
+            QTableView::item { border: none; padding: 1px; }
+            QTableView::item:selected {
+                background-color: rgba(47, 128, 237, 95);
+                color: #102A43;
+            }
+            QTableView::item:selected:!active {
+                background-color: rgba(47, 128, 237, 110);
+                color: #102A43;
+            }
+        """)
 
         # 选中后按任意键即可编辑（类 Excel 行为）
         self.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked |
-            QAbstractItemView.EditTrigger.SelectedClicked |
             QAbstractItemView.EditTrigger.AnyKeyPressed
         )
 
@@ -168,6 +185,59 @@ class PreviewTable(QTableWidget):
         cd.static_text = text
         self._template.set_cell_data(row, col, cd)
         self.cell_edited.emit(row, col, text)
+
+    def keyPressEvent(self, event):
+        """优先处理 Excel 常用快捷键，避免 AnyKeyPressed 抢占 Ctrl+V。"""
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self.copy_requested.emit()
+            event.accept()
+            return
+        if event.matches(QKeySequence.StandardKey.Paste):
+            self.paste_requested.emit()
+            event.accept()
+            return
+        if event.matches(QKeySequence.StandardKey.Undo):
+            self.undo_requested.emit()
+            event.accept()
+            return
+        if event.matches(QKeySequence.StandardKey.Redo):
+            self.redo_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        index = self.indexAt(event.position().toPoint())
+        plain_left = (event.button() == Qt.MouseButton.LeftButton and
+                      not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier |
+                                                Qt.KeyboardModifier.ShiftModifier)))
+        self._mouse_press_cell = (index.row(), index.column()) if plain_left and index.isValid() else None
+        self._mouse_dragged = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._mouse_press_cell is not None:
+            index = self.indexAt(event.position().toPoint())
+            if index.isValid() and (index.row(), index.column()) != self._mouse_press_cell:
+                self._mouse_dragged = True
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if self._mouse_press_cell is not None and not self._mouse_dragged:
+            row, col = self._mouse_press_cell
+            mr = self._template.get_merge_range(row, col)
+            self._paste_anchor_cell = (mr.top_row, mr.left_col) if mr else (row, col)
+        elif self._mouse_dragged:
+            self._paste_anchor_cell = None
+        self._mouse_press_cell = None
+
+    def paste_anchor_cell(self) -> tuple[int, int] | None:
+        """最后一次普通单击的单元格；用于 Excel 式锚点粘贴。"""
+        return self._paste_anchor_cell
+
+    def clear_paste_anchor(self):
+        self._paste_anchor_cell = None
 
     # ------------------------------------------------------------------
     # 缩放功能（Ctrl+滚轮）
@@ -241,8 +311,41 @@ class PreviewTable(QTableWidget):
         self.selection_changed.emit(-1, -1, "default")
 
     def get_selected_cells(self) -> list[tuple[int, int]]:
-        """获取所有选中的单元格坐标列表。"""
-        return [(idx.row(), idx.column()) for idx in self.selectedIndexes()]
+        """获取选区；若碰到合并格，自动扩展到完整合并范围。"""
+        cells = {(idx.row(), idx.column()) for idx in self.selectedIndexes()}
+        changed = True
+        while changed:
+            changed = False
+            for mr in self._template.merge_ranges:
+                merged = {(r, c) for r in range(mr.top_row, mr.bottom_row + 1)
+                          for c in range(mr.left_col, mr.right_col + 1)}
+                if cells & merged and not merged <= cells:
+                    cells |= merged
+                    changed = True
+        return sorted(cells)
+
+    def get_selected_cells_raw(self) -> list[tuple[int, int]]:
+        """获取原始选区（不扩展合并单元格）。"""
+        return sorted({(idx.row(), idx.column()) for idx in self.selectedIndexes()})
+
+    def select_cells(self, cells: list[tuple[int, int]], current: tuple[int, int] | None = None):
+        """恢复一个或多个单元格的选择状态。"""
+        valid = sorted({(r, c) for r, c in cells
+                        if 0 <= r < self.rowCount() and 0 <= c < self.columnCount()})
+        if not valid:
+            return
+        self._paste_anchor_cell = None
+        blocker = QSignalBlocker(self)
+        self.clearSelection()
+        active = current if current in valid else valid[0]
+        self.selectionModel().setCurrentIndex(
+            self.model().index(active[0], active[1]),
+            QItemSelectionModel.SelectionFlag.NoUpdate,
+        )
+        for row, col in valid:
+            self.setRangeSelected(QTableWidgetSelectionRange(row, col, row, col), True)
+        del blocker
+        self.viewport().update()
 
     # ------------------------------------------------------------------
     # 样式管理 (写给 StylePanel 调用)
@@ -289,6 +392,8 @@ class PreviewTable(QTableWidget):
         cd = self._template.get_cell_data(row, col)
         if cd.static_text:
             text = cd.static_text
+        elif (row, col) in self._query_results:
+            text = self._query_results[(row, col)]
         elif row < len(self._data) and col < len(self._data[0]):
             text = self._data[row][col]
 
@@ -373,9 +478,16 @@ class PreviewTable(QTableWidget):
             for c in range(self._template.cols):
                 cd = self._template.get_cell_data(r, c)
                 text = cd.static_text if cd.static_text else ""
+                if not text and (r, c) in self._query_results:
+                    text = self._query_results[(r, c)]
                 row_data.append(text)
             result.append(row_data)
         return result
+
+    def set_query_results(self, results: dict[tuple[int, int], str]):
+        """设置数据库查询结果并刷新显示。"""
+        self._query_results = results
+        self.refresh_all()
 
     def set_data(self, data: list[list[str]]):
         self._data = [row[:] for row in data]
