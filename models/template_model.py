@@ -67,7 +67,7 @@ class CellStyle:
     border_left_color: Optional[str] = None
     border_right_color: Optional[str] = None
     border_line_style: Optional[str] = None  # 线型: solid/dashed/dotted/dash_dot/double
-    border_width: Optional[int] = None       # 粗细: 1-5
+    border_width: Optional[float] = None       # 粗细: 0.5-5.0
     number_format: Optional[str] = None   # NumberFormat 值
 
     def merge(self, other: "CellStyle") -> "CellStyle":

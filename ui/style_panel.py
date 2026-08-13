@@ -7,7 +7,7 @@
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
-    QComboBox, QSpinBox, QCheckBox, QPushButton, QButtonGroup,
+    QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QPushButton, QButtonGroup,
     QColorDialog, QFrame, QSizePolicy, QScrollArea, QToolBox,
     QTextEdit, QLineEdit, QTabWidget,
 )
@@ -45,6 +45,8 @@ class StylePanel(QScrollArea):
         self.setMinimumWidth(260)
         self.setMaximumWidth(340)
 
+        self._suppress_update = False
+
         self._container = QWidget()
         self.setWidget(self._container)
         self._main_layout = QVBoxLayout(self._container)
@@ -63,8 +65,6 @@ class StylePanel(QScrollArea):
         # 应用范围按钮
         self._build_apply_buttons()
         self._build_action_buttons()
-
-        self._suppress_update = False
 
     # ==================================================================
     # 选取信息
@@ -96,7 +96,7 @@ class StylePanel(QScrollArea):
         self._cmb_font = QComboBox()
         self._cmb_font.addItems(QFontDatabase.families())
         self._cmb_font.setCurrentText("宋体")
-        self._cmb_font.currentTextChanged.connect(self._on_font_changed)
+        self._cmb_font.currentTextChanged.connect(self._on_cjk_font_changed)
         r1.addWidget(self._cmb_font, 1)
         fl.addLayout(r1)
 
@@ -105,7 +105,7 @@ class StylePanel(QScrollArea):
         self._cmb_font_western = QComboBox()
         self._cmb_font_western.addItems(QFontDatabase.families())
         self._cmb_font_western.setCurrentText("Times New Roman")
-        self._cmb_font_western.currentTextChanged.connect(self._on_font_changed)
+        self._cmb_font_western.currentTextChanged.connect(self._on_western_font_changed)
         r1w.addWidget(self._cmb_font_western, 1)
         fl.addLayout(r1w)
 
@@ -212,18 +212,20 @@ class StylePanel(QScrollArea):
         self._cmb_border_style = QComboBox()
         self._cmb_border_style.addItems(["实线", "虚线", "点线", "点划线", "双线", "无"])
         self._cmb_border_style.setCurrentIndex(0)
-        self._cmb_border_style.currentIndexChanged.connect(self._on_border_changed)
+        self._cmb_border_style.currentIndexChanged.connect(self._on_border_style_changed)
         br_style.addWidget(self._cmb_border_style, 1)
         bl.addLayout(br_style)
 
         # 粗细
         br_weight = QHBoxLayout()
         br_weight.addWidget(QLabel("粗细:"))
-        self._spn_border_width = QSpinBox()
-        self._spn_border_width.setRange(1, 5)
-        self._spn_border_width.setValue(1)
+        self._spn_border_width = QDoubleSpinBox()
+        self._spn_border_width.setRange(0.5, 5.0)
+        self._spn_border_width.setSingleStep(0.5)
+        self._spn_border_width.setDecimals(1)
+        self._spn_border_width.setValue(1.0)
         self._spn_border_width.setSuffix(" px")
-        self._spn_border_width.valueChanged.connect(self._on_border_changed)
+        self._spn_border_width.valueChanged.connect(self._on_border_width_changed)
         br_weight.addWidget(self._spn_border_width)
         br_weight.addStretch()
         bl.addLayout(br_weight)
@@ -234,9 +236,12 @@ class StylePanel(QScrollArea):
         self._chk_border_bottom = QCheckBox("下")
         self._chk_border_left = QCheckBox("左")
         self._chk_border_right = QCheckBox("右")
+        self._chk_border_top.stateChanged.connect(lambda *_: self._on_border_dir_changed("top"))
+        self._chk_border_bottom.stateChanged.connect(lambda *_: self._on_border_dir_changed("bottom"))
+        self._chk_border_left.stateChanged.connect(lambda *_: self._on_border_dir_changed("left"))
+        self._chk_border_right.stateChanged.connect(lambda *_: self._on_border_dir_changed("right"))
         for chk in (self._chk_border_top, self._chk_border_bottom,
                     self._chk_border_left, self._chk_border_right):
-            chk.stateChanged.connect(self._on_border_changed)
             br_dir.addWidget(chk)
         bl.addLayout(br_dir)
 
@@ -250,14 +255,63 @@ class StylePanel(QScrollArea):
         bl.addWidget(self._lbl_border_preview)
         lay.addWidget(border_grp)
 
-        # --- 数字格式 ---
+        # --- 数字格式（两级设置，类 Excel）---
         nf_grp = QGroupBox("数字格式")
-        nf_lay = QHBoxLayout(nf_grp)
-        nf_lay.addWidget(QLabel("格式:"))
-        self._cmb_number_format = QComboBox()
-        self._cmb_number_format.addItems(["常规", "文本", "整数 #,##0", "两位小数 #,##0.00", "百分比 0.00%", "日期 yyyy-mm-dd"])
-        self._cmb_number_format.currentIndexChanged.connect(self._on_number_format_changed)
-        nf_lay.addWidget(self._cmb_number_format, 1)
+        nf_lay = QVBoxLayout(nf_grp)
+        # 第一级：类别
+        cat_row = QHBoxLayout()
+        cat_row.addWidget(QLabel("类别:"))
+        self._cmb_number_cat = QComboBox()
+        self._cmb_number_cat.addItems(["常规", "数值", "日期", "百分比", "文本", "自定义"])
+        self._cmb_number_cat.setCurrentIndex(0)
+        self._cmb_number_cat.currentIndexChanged.connect(self._on_number_cat_changed)
+        cat_row.addWidget(self._cmb_number_cat, 1)
+        nf_lay.addLayout(cat_row)
+
+        # 第二级：子选项容器（动态切换）
+        self._nf_sub_widget = QWidget()
+        self._nf_sub_layout = QVBoxLayout(self._nf_sub_widget)
+        self._nf_sub_layout.setContentsMargins(0, 2, 0, 0)
+        self._nf_sub_layout.setSpacing(4)
+
+        # -- 数值/百分比：小数位数 --
+        dec_row = QHBoxLayout()
+        dec_row.addWidget(QLabel("小数位数:"))
+        self._spn_nf_decimals = QSpinBox()
+        self._spn_nf_decimals.setRange(0, 10)
+        self._spn_nf_decimals.setValue(2)
+        self._spn_nf_decimals.valueChanged.connect(self._on_number_format_changed)
+        dec_row.addWidget(self._spn_nf_decimals)
+        dec_row.addStretch()
+        self._nf_decimals_row = QWidget()
+        self._nf_decimals_row.setLayout(dec_row)
+
+        # -- 日期：格式选项 --
+        self._cmb_nf_date = QComboBox()
+        self._cmb_nf_date.addItems([
+            "yyyy-mm-dd", "yyyy/mm/dd", "yyyy年mm月dd日",
+            "mm-dd", "mm/dd", "yyyy-mm", "yyyy/mm",
+        ])
+        self._cmb_nf_date.currentIndexChanged.connect(self._on_number_format_changed)
+
+        # -- 自定义：自由输入 --
+        self._txt_nf_custom = QLineEdit()
+        self._txt_nf_custom.setPlaceholderText("输入自定义格式，如 0.0000、¥#,##0.00")
+        self._txt_nf_custom.textChanged.connect(self._on_number_format_changed)
+
+        # -- 常规/文本：提示文字 --
+        self._lbl_nf_hint = QLabel("无任何特定数字格式")
+        self._lbl_nf_hint.setStyleSheet("color:#888; font-size:11px;")
+
+        self._nf_sub_layout.addWidget(self._nf_decimals_row)
+        self._nf_sub_layout.addWidget(self._cmb_nf_date)
+        self._nf_sub_layout.addWidget(self._txt_nf_custom)
+        self._nf_sub_layout.addWidget(self._lbl_nf_hint)
+        nf_lay.addWidget(self._nf_sub_widget)
+
+        # 默认：常规 → 显示提示
+        self._on_number_cat_changed(0)
+
         lay.addWidget(nf_grp)
 
         lay.addStretch()
@@ -527,15 +581,52 @@ class StylePanel(QScrollArea):
         # 更新边框预览
         self._update_border_preview()
 
-        # 数字格式
-        nf_map = {
-            "general": 0, "text": 1, "integer": 2,
-            "decimal_2": 3, "percent": 4, "date": 5,
-        }
+        # 数字格式（两级设置：反向解析 → 设置类别和子选项）
         if style.number_format:
-            self._cmb_number_format.setCurrentIndex(nf_map.get(style.number_format, 0))
+            nf = style.number_format
+            if nf == "general":
+                self._cmb_number_cat.setCurrentIndex(0)  # 常规
+            elif nf == "integer":
+                self._cmb_number_cat.setCurrentIndex(1)  # 数值
+                self._spn_nf_decimals.setValue(0)
+            elif nf == "decimal_2":
+                self._cmb_number_cat.setCurrentIndex(1)
+                self._spn_nf_decimals.setValue(2)
+            elif nf == "decimal_3":
+                self._cmb_number_cat.setCurrentIndex(1)
+                self._spn_nf_decimals.setValue(3)
+            elif nf.startswith("#,##0."):
+                self._cmb_number_cat.setCurrentIndex(1)
+                decimals = len(nf) - nf.rfind("0") - 1
+                self._spn_nf_decimals.setValue(max(0, min(10, decimals)))
+            elif nf == "text":
+                self._cmb_number_cat.setCurrentIndex(4)  # 文本
+            elif nf == "percent":
+                self._cmb_number_cat.setCurrentIndex(3)  # 百分比
+                self._spn_nf_decimals.setValue(2)
+            elif nf.endswith("%"):
+                self._cmb_number_cat.setCurrentIndex(3)  # 百分比
+                # 解析小数点位数，如 0.000% → 3
+                core = nf.rstrip("%")
+                if "." in core:
+                    decimals = len(core) - core.rfind("0") - 1
+                else:
+                    decimals = 0
+                self._spn_nf_decimals.setValue(max(0, min(10, decimals)))
+            elif nf == "date" or any(d in nf for d in ["yyyy", "mm", "dd", "yy"]):
+                self._cmb_number_cat.setCurrentIndex(2)  # 日期
+                idx = self._cmb_nf_date.findText(nf)
+                if idx >= 0:
+                    self._cmb_nf_date.setCurrentIndex(idx)
+            else:
+                # 自定义格式字符串
+                self._cmb_number_cat.setCurrentIndex(5)  # 自定义
+                self._txt_nf_custom.setText(nf)
+            # 触发类别变更以显示正确的子控件
+            self._on_number_cat_changed(self._cmb_number_cat.currentIndex())
         else:
-            self._cmb_number_format.setCurrentIndex(0)
+            self._cmb_number_cat.setCurrentIndex(0)
+            self._on_number_cat_changed(0)
 
         self._suppress_update = False
 
@@ -592,101 +683,62 @@ class StylePanel(QScrollArea):
     # ==================================================================
     # 控件变更 → 实时应用到模板
     # ==================================================================
-    def _collect_style_from_ui(self) -> CellStyle:
-        """从第一组面板收集样式。"""
-        style = CellStyle()
+    def _collect_number_format(self):
+        """从两级数字格式 UI 收集 number_format 字符串。"""
+        categories = ["常规", "数值", "日期", "百分比", "文本", "自定义"]
+        cat = categories[self._cmb_number_cat.currentIndex()]
+        if cat == "常规":
+            return "general"
+        if cat == "文本":
+            return "text"
+        if cat == "数值":
+            decimals = self._spn_nf_decimals.value()
+            if decimals == 0:
+                return "integer"
+            if decimals == 2:
+                return "decimal_2"
+            if decimals == 3:
+                return "decimal_3"
+            return "#,##0." + "0" * decimals
+        if cat == "日期":
+            return self._cmb_nf_date.currentText()
+        if cat == "百分比":
+            decimals = self._spn_nf_decimals.value()
+            if decimals == 0:
+                return "0%"
+            if decimals == 2:
+                return "percent"  # 0.00%
+            return "0." + "0" * decimals + "%"
+        if cat == "自定义":
+            txt = self._txt_nf_custom.text().strip()
+            return txt if txt else None
+        return None
 
-        txt = self._cmb_font.currentText().strip()
-        if txt:
-            style.font_family = txt
+    def _apply_style(self, style: CellStyle):
+        """增量应用：只覆盖本次修改的字段（非 None 字段）。
 
-        txt_w = self._cmb_font_western.currentText().strip()
-        if txt_w:
-            style.font_family_western = txt_w
-        style.font_size = self._spn_size.value()
-
-        if self._chk_bold.checkState() != Qt.CheckState.PartiallyChecked:
-            style.bold = self._chk_bold.isChecked()
-        if self._chk_italic.checkState() != Qt.CheckState.PartiallyChecked:
-            style.italic = self._chk_italic.isChecked()
-        if self._chk_underline.checkState() != Qt.CheckState.PartiallyChecked:
-            style.underline = self._chk_underline.isChecked()
-
-        checked = self._align_group.checkedId()
-        align_map = {
-            0: int(Qt.AlignmentFlag.AlignLeft),
-            1: int(Qt.AlignmentFlag.AlignCenter),
-            2: int(Qt.AlignmentFlag.AlignRight),
-        }
-        if checked >= 0:
-            style.alignment = align_map[checked]
-
-        # 垂直对齐
-        v_checked = self._valign_group.checkedId()
-        valign_map = {
-            0: int(Qt.AlignmentFlag.AlignTop),
-            1: int(Qt.AlignmentFlag.AlignVCenter),
-            2: int(Qt.AlignmentFlag.AlignBottom),
-        }
-        if v_checked >= 0:
-            style.vertical_alignment = valign_map[v_checked]
-
-        if not self._chk_fg_reset.isChecked():
-            style.fg_color = self._extract_color_from_button(self._btn_fg_color)
-        if not self._chk_bg_reset.isChecked():
-            style.bg_color = self._extract_color_from_button(self._btn_bg_color)
-
-        # 边框
-        border_styles = ["solid", "dashed", "dotted", "dash_dot", "double", "none"]
-        line_style = border_styles[self._cmb_border_style.currentIndex()]
-        if line_style != "none":
-            # 方向
-            if self._chk_border_top.isChecked():
-                style.border_top = line_style
-            if self._chk_border_bottom.isChecked():
-                style.border_bottom = line_style
-            if self._chk_border_left.isChecked():
-                style.border_left = line_style
-            if self._chk_border_right.isChecked():
-                style.border_right = line_style
-            style.border_line_style = line_style
-            style.border_width = self._spn_border_width.value()
-
-        # 数字格式
-        nf_map = {
-            0: "general", 1: "text", 2: "integer",
-            3: "decimal_2", 4: "percent", 5: "date",
-        }
-        style.number_format = nf_map.get(self._cmb_number_format.currentIndex(), "general")
-
-        return style
-
-    @staticmethod
-    def _extract_color_from_button(btn: QPushButton) -> str:
-        ss = btn.styleSheet()
-        for part in ss.split(";"):
-            part = part.strip()
-            if part.startswith("background-color:"):
-                return part.split(":", 1)[1].strip()
-        return "#000000"
-
-    def _apply_style(self):
+        style 中为 None 的字段会沿用目标单元格/范围原有的样式，
+        从而避免把整个左侧面板的设置一股脑全部应用。
+        """
         if self._suppress_update:
             return
-        style = self._collect_style_from_ui()
 
-        # 多单元格选中 → 每个单元格都应用 CELL 级别样式
+        # 多单元格选中 → 每个单元格分别 merge
         if len(self._selected_cells) > 1:
             for r, c in self._selected_cells:
-                self._template.set_cell_style(r, c, style)
+                existing = self._template.cell_styles.get((r, c), CellStyle())
+                self._template.set_cell_style(r, c, existing.merge(style))
         elif self._current_scope == StyleScope.DEFAULT:
-            self._template.default_style = style.clone()
+            self._template.default_style = self._template.default_style.merge(style)
         elif self._current_scope == StyleScope.COLUMN and self._current_col >= 0:
-            self._template.set_column_style(self._current_col, style)
+            existing = self._template.column_styles.get(self._current_col, CellStyle())
+            self._template.set_column_style(self._current_col, existing.merge(style))
         elif self._current_scope == StyleScope.ROW and self._current_row >= 0:
-            self._template.set_row_style(self._current_row, style)
+            existing = self._template.row_styles.get(self._current_row, CellStyle())
+            self._template.set_row_style(self._current_row, existing.merge(style))
         elif self._current_scope == StyleScope.CELL and self._current_row >= 0 and self._current_col >= 0:
-            self._template.set_cell_style(self._current_row, self._current_col, style)
+            existing = self._template.cell_styles.get((self._current_row, self._current_col), CellStyle())
+            self._template.set_cell_style(self._current_row, self._current_col, existing.merge(style))
 
         self.style_changed.emit()
 
@@ -732,26 +784,51 @@ class StylePanel(QScrollArea):
     # ------------------------------------------------------------------
     # 信号槽
     # ------------------------------------------------------------------
-    def _on_font_changed(self, _txt):
-        self._apply_style()
+    def _on_cjk_font_changed(self, txt):
+        txt = txt.strip()
+        if txt:
+            self._apply_style(CellStyle(font_family=txt))
 
-    def _on_size_changed(self, _val):
-        self._apply_style()
+    def _on_western_font_changed(self, txt):
+        txt = txt.strip()
+        if txt:
+            self._apply_style(CellStyle(font_family_western=txt))
+
+    def _on_size_changed(self, val):
+        self._apply_style(CellStyle(font_size=val))
 
     def _on_bold_changed(self, _state):
-        self._apply_style()
+        if self._chk_bold.checkState() == Qt.CheckState.PartiallyChecked:
+            return
+        self._apply_style(CellStyle(bold=self._chk_bold.isChecked()))
 
     def _on_italic_changed(self, _state):
-        self._apply_style()
+        if self._chk_italic.checkState() == Qt.CheckState.PartiallyChecked:
+            return
+        self._apply_style(CellStyle(italic=self._chk_italic.isChecked()))
 
     def _on_underline_changed(self, _state):
-        self._apply_style()
+        if self._chk_underline.checkState() == Qt.CheckState.PartiallyChecked:
+            return
+        self._apply_style(CellStyle(underline=self._chk_underline.isChecked()))
 
-    def _on_alignment_changed(self, _id):
-        self._apply_style()
+    def _on_alignment_changed(self, id_):
+        align_map = {
+            0: int(Qt.AlignmentFlag.AlignLeft),
+            1: int(Qt.AlignmentFlag.AlignCenter),
+            2: int(Qt.AlignmentFlag.AlignRight),
+        }
+        if id_ >= 0:
+            self._apply_style(CellStyle(alignment=align_map[id_]))
 
-    def _on_valignment_changed(self, _id):
-        self._apply_style()
+    def _on_valignment_changed(self, id_):
+        valign_map = {
+            0: int(Qt.AlignmentFlag.AlignTop),
+            1: int(Qt.AlignmentFlag.AlignVCenter),
+            2: int(Qt.AlignmentFlag.AlignBottom),
+        }
+        if id_ >= 0:
+            self._apply_style(CellStyle(vertical_alignment=valign_map[id_]))
 
     def _on_fg_color_clicked(self):
         color = QColorDialog.getColor()
@@ -759,8 +836,10 @@ class StylePanel(QScrollArea):
             self._btn_fg_color.setStyleSheet(
                 f"background-color:{color.name()}; border:1px solid #999; border-radius:3px;"
             )
+            self._chk_fg_reset.blockSignals(True)
             self._chk_fg_reset.setChecked(False)
-            self._apply_style()
+            self._chk_fg_reset.blockSignals(False)
+            self._apply_style(CellStyle(fg_color=color.name()))
 
     def _on_bg_color_clicked(self):
         color = QColorDialog.getColor(QColor("#FFFFFF"))
@@ -768,26 +847,58 @@ class StylePanel(QScrollArea):
             self._btn_bg_color.setStyleSheet(
                 f"background-color:{color.name()}; border:1px solid #999; border-radius:3px;"
             )
+            self._chk_bg_reset.blockSignals(True)
             self._chk_bg_reset.setChecked(False)
-            self._apply_style()
+            self._chk_bg_reset.blockSignals(False)
+            self._apply_style(CellStyle(bg_color=color.name()))
 
     def _on_fg_reset_changed(self, state):
         if state == Qt.CheckState.Checked.value:
             self._btn_fg_color.setStyleSheet(
                 "background-color:#000000; border:1px solid #999; border-radius:3px;"
             )
-        self._apply_style()
+            self._apply_style(CellStyle(fg_color=""))
 
     def _on_bg_reset_changed(self, state):
         if state == Qt.CheckState.Checked.value:
             self._btn_bg_color.setStyleSheet(
                 "background-color:#FFFFFF; border:1px solid #999; border-radius:3px;"
             )
-        self._apply_style()
+            self._apply_style(CellStyle(bg_color=""))
 
-    def _on_border_changed(self):
+    def _current_border_line_style(self) -> str:
+        border_styles = ["solid", "dashed", "dotted", "dash_dot", "double", "none"]
+        return border_styles[self._cmb_border_style.currentIndex()]
+
+    def _on_border_style_changed(self):
+        """线型变更：更新线型及所有已勾选方向。"""
+        line_style = self._current_border_line_style()
+        style = CellStyle(border_line_style=line_style if line_style != "none" else None)
+        if line_style == "none":
+            style.border_top = style.border_bottom = style.border_left = style.border_right = ""
+        else:
+            if self._chk_border_top.isChecked():
+                style.border_top = line_style
+            if self._chk_border_bottom.isChecked():
+                style.border_bottom = line_style
+            if self._chk_border_left.isChecked():
+                style.border_left = line_style
+            if self._chk_border_right.isChecked():
+                style.border_right = line_style
         self._update_border_preview()
-        self._apply_style()
+        self._apply_style(style)
+
+    def _on_border_width_changed(self, val):
+        self._update_border_preview()
+        self._apply_style(CellStyle(border_width=val))
+
+    def _on_border_dir_changed(self, side: str):
+        """单个方向勾选/取消：只应用该方向。"""
+        line_style = self._current_border_line_style()
+        chk = getattr(self, f"_chk_border_{side}")
+        val = line_style if (chk.isChecked() and line_style != "none") else ""
+        self._update_border_preview()
+        self._apply_style(CellStyle(**{f"border_{side}": val}))
 
     def _update_border_preview(self):
         """根据当前边框设置更新预览标签，按方向分别展示。"""
@@ -798,6 +909,7 @@ class StylePanel(QScrollArea):
                    "dash_dot": "dashed", "double": "double", "none": "none"}
         qss_style = qss_map.get(line_style, "solid")
         width = self._spn_border_width.value()
+        width_str = f"{width:.1f}".rstrip('0').rstrip('.')  # 去除多余小数点
         top_on = self._chk_border_top.isChecked()
         bottom_on = self._chk_border_bottom.isChecked()
         left_on = self._chk_border_left.isChecked()
@@ -819,9 +931,9 @@ class StylePanel(QScrollArea):
         ]
         for side, on in side_props:
             if on:
-                parts.append(f"border-{side}:{width}px {qss_style} #5B9BD5;")
+                parts.append(f"border-{side}:{width_str}px {qss_style} #5B9BD5;")
             else:
-                parts.append(f"border-{side}:{width}px none transparent;")
+                parts.append(f"border-{side}:{width_str}px none transparent;")
 
         self._lbl_border_preview.setStyleSheet(" ".join(parts))
 
@@ -831,10 +943,31 @@ class StylePanel(QScrollArea):
         if bottom_on: sides.append("下")
         if left_on: sides.append("左")
         if right_on: sides.append("右")
-        self._lbl_border_preview.setText(f"{style_names.get(line_style, '')} {width}px  [{''.join(sides)}]")
+        self._lbl_border_preview.setText(f"{style_names.get(line_style, '')} {width_str}px  [{''.join(sides)}]")
+
+    def _on_number_cat_changed(self, idx: int):
+        """切换数字格式类别，显示/隐藏对应的子选项。"""
+        categories = ["常规", "数值", "日期", "百分比", "文本", "自定义"]
+        cat = categories[idx] if 0 <= idx < len(categories) else "常规"
+        # 全部隐藏
+        self._nf_decimals_row.hide()
+        self._cmb_nf_date.hide()
+        self._txt_nf_custom.hide()
+        self._lbl_nf_hint.hide()
+        if cat in ("数值", "百分比"):
+            self._nf_decimals_row.show()
+        elif cat == "日期":
+            self._cmb_nf_date.show()
+        elif cat == "自定义":
+            self._txt_nf_custom.show()
+        else:
+            self._lbl_nf_hint.setText("无任何特定数字格式" if cat == "常规" else "文本格式")
+            self._lbl_nf_hint.show()
+        if not self._suppress_update:
+            self._apply_style(CellStyle(number_format=self._collect_number_format()))
 
     def _on_number_format_changed(self):
-        self._apply_style()
+        self._apply_style(CellStyle(number_format=self._collect_number_format()))
 
     def _on_db_enabled_changed(self, _state):
         self._apply_db_binding()

@@ -29,6 +29,7 @@ _NUMBER_FORMAT_MAP = {
     "text": "@",
     "integer": "#,##0",
     "decimal_2": "#,##0.00",
+    "decimal_3": "#,##0.000",
     "percent": "0.00%",
     "date": "yyyy-mm-dd",
 }
@@ -137,7 +138,8 @@ class ExcelExporter:
                 # 尝试将文本转为数值（根据数字格式）
                 style = template.get_effective_style(r_idx, c_idx)
                 num_fmt = style.number_format
-                if num_fmt in (NumberFormat.INTEGER.value, NumberFormat.DECIMAL_2.value):
+                if num_fmt in (NumberFormat.INTEGER.value, NumberFormat.DECIMAL_2.value,
+                               "decimal_3"):
                     try:
                         val = float(cell_text.replace(",", ""))
                         if num_fmt == NumberFormat.INTEGER.value:
@@ -232,7 +234,7 @@ class ExcelExporter:
             width=style.border_width,
         )
 
-        # 数字格式
+        # 数字格式（支持自定义格式字符串）
         if style.number_format:
-            fmt = _NUMBER_FORMAT_MAP.get(style.number_format, "General")
+            fmt = _NUMBER_FORMAT_MAP.get(style.number_format, style.number_format)
             cell.number_format = fmt

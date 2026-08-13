@@ -1,8 +1,8 @@
-"""预览表格组件（增强版）—— 支持多选、合并单元格可视化、自定义行高列宽。"""
+"""预览表格组件（增强版）—— 支持多选、合并单元格可视化、缩放、自定义行高列宽。"""
 
 from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QStyledItemDelegate, QStyle,
+    QStyledItemDelegate, QStyle, QApplication,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QSignalBlocker
 from PyQt6.QtGui import QColor, QFont, QBrush, QPen, QPainter
@@ -14,14 +14,20 @@ class BorderDelegate(QStyledItemDelegate):
     """绘制单元格边框的自定义委托。"""
 
     def paint(self, painter: QPainter, option, index):
-        # 先绘制默认内容
+        # 手动绘制底色（item.setBackground 与 QSS border:none 冲突导致不渲染）
+        bg = index.data(Qt.ItemDataRole.BackgroundRole)
+        if bg:
+            painter.save()
+            painter.fillRect(option.rect, bg)
+            painter.restore()
+        # 绘制默认内容
         super().paint(painter, option, index)
         # 读取边框数据
         border_data = index.data(Qt.ItemDataRole.UserRole)
         if not border_data:
             return
         top, bottom, left, right, line_style, width, colors = border_data
-        width = max(width or 1, 1)
+        width = float(width or 1.0)
         style_map = {"solid": Qt.PenStyle.SolidLine, "dashed": Qt.PenStyle.DashLine,
                      "dotted": Qt.PenStyle.DotLine, "dash_dot": Qt.PenStyle.DashDotLine,
                      "double": Qt.PenStyle.SolidLine}
@@ -33,7 +39,7 @@ class BorderDelegate(QStyledItemDelegate):
             if not side_style:
                 return
             pen = QPen(QColor(color or "#606770"))
-            pen.setWidth(width)
+            pen.setWidthF(width)
             effective_style = side_style if side_style in style_map else line_style
             pen.setStyle(style_map.get(effective_style, Qt.PenStyle.SolidLine))
             painter.setPen(pen)
@@ -67,12 +73,16 @@ class PreviewTable(QTableWidget):
     style_applied = pyqtSignal()
     cells_selected = pyqtSignal(list)  # [(row,col), ...]
     cell_edited = pyqtSignal(int, int, str)  # row, col, new_text
+    zoom_changed = pyqtSignal(int)  # zoom level %
 
     def __init__(self, template: TemplateModel, is_admin: bool = True, parent=None):
         super().__init__(parent)
         self._template = template
         self._is_admin = is_admin
         self._data: list[list[str]] = []
+        self._zoom: int = 100  # 缩放百分比
+        self._base_font_size: int = 10  # 基准字号
+        self._base_row_height: int = 36  # 基准行高
         self._init_data()
         self._setup_ui()
         self._connect_signals()
@@ -158,6 +168,40 @@ class PreviewTable(QTableWidget):
         cd.static_text = text
         self._template.set_cell_data(row, col, cd)
         self.cell_edited.emit(row, col, text)
+
+    # ------------------------------------------------------------------
+    # 缩放功能（Ctrl+滚轮）
+    # ------------------------------------------------------------------
+    def wheelEvent(self, event):
+        """Ctrl+滚轮缩放表格，类 Excel 行为。"""
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                new_zoom = min(self._zoom + 10, 200)
+            else:
+                new_zoom = max(self._zoom - 10, 50)
+            self.set_zoom(new_zoom)
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+    def set_zoom(self, zoom: int):
+        """设置缩放百分比 (50-200)。"""
+        zoom = max(50, min(200, zoom))
+        if zoom == self._zoom:
+            return
+        self._zoom = zoom
+        factor = zoom / 100.0
+        vh = self.verticalHeader()
+        vh.setDefaultSectionSize(int(self._base_row_height * factor))
+        f = self.font()
+        f.setPointSizeF(self._base_font_size * factor)
+        self.setFont(f)
+        self.refresh_all()
+        self.zoom_changed.emit(zoom)
+
+    def zoom_level(self) -> int:
+        return self._zoom
 
     # ------------------------------------------------------------------
     # 选择事件
@@ -293,11 +337,15 @@ class PreviewTable(QTableWidget):
 
         bg = style.to_qcolor_bg()
         if bg and bg.isValid():
-            item.setBackground(bg)
+            item.setData(Qt.ItemDataRole.BackgroundRole, QBrush(bg))
+        else:
+            item.setData(Qt.ItemDataRole.BackgroundRole, None)
 
         fg = style.to_qcolor_fg()
         if fg and fg.isValid():
-            item.setForeground(fg)
+            item.setData(Qt.ItemDataRole.ForegroundRole, QBrush(fg))
+        else:
+            item.setData(Qt.ItemDataRole.ForegroundRole, None)
 
         # 存储边框数据到 UserRole 供 BorderDelegate 绘制
         has_border = any([style.border_top, style.border_bottom,

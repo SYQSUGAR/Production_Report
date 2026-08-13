@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QSplitter, QToolBar, QStatusBar, QFileDialog,
     QMessageBox, QLabel, QWidget, QVBoxLayout, QHBoxLayout,
     QMenuBar, QMenu, QInputDialog, QDateEdit, QComboBox, QFontComboBox,
-    QSpinBox, QColorDialog, QPushButton, QToolButton,
+    QSpinBox, QColorDialog, QPushButton, QToolButton, QSlider,
     QDialog, QDialogButtonBox, QFormLayout, QLineEdit,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QDate, QSettings
@@ -504,6 +504,20 @@ class MainWindow(QMainWindow):
         self._status_label = QLabel("就绪 — 管理员模式 | 点击单元格开始编辑")
         self.statusBar().addWidget(self._status_label, 1)
 
+        # 缩放控件（类 Excel）
+        self._zoom_label = QLabel("100%")
+        self._zoom_label.setFixedWidth(40)
+        self._zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self._zoom_slider.setRange(50, 200)
+        self._zoom_slider.setValue(100)
+        self._zoom_slider.setFixedWidth(120)
+        self._zoom_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self._zoom_slider.setTickInterval(50)
+        self._zoom_slider.valueChanged.connect(self._on_zoom_slider_changed)
+        self.statusBar().addPermanentWidget(self._zoom_slider)
+        self.statusBar().addPermanentWidget(self._zoom_label)
+
     # ==================================================================
     # 信号连接
     # ==================================================================
@@ -519,6 +533,9 @@ class MainWindow(QMainWindow):
         # 公式栏内容变更
         self._formula_bar.content_changed.connect(self._on_formula_content_changed)
         self._formula_bar.batch_apply.connect(self._on_batch_apply)
+
+        # 缩放信号
+        self._preview.zoom_changed.connect(self._on_preview_zoom_changed)
 
     # ==================================================================
     # 槽函数
@@ -562,6 +579,18 @@ class MainWindow(QMainWindow):
 
     def _on_style_changed(self):
         self._preview.refresh_all()
+
+    def _on_zoom_slider_changed(self, value: int):
+        """底部缩放滑块变更 → 更新表格。"""
+        self._preview.set_zoom(value)
+        self._zoom_label.setText(f"{value}%")
+
+    def _on_preview_zoom_changed(self, zoom: int):
+        """Ctrl+滚轮缩放 → 同步滑块。"""
+        self._zoom_slider.blockSignals(True)
+        self._zoom_slider.setValue(zoom)
+        self._zoom_slider.blockSignals(False)
+        self._zoom_label.setText(f"{zoom}%")
 
     def _on_formula_content_changed(self, row: int, col: int, text: str):
         """公式栏文本变更 → 更新单元格数据。"""

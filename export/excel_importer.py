@@ -71,14 +71,17 @@ def _alignment(value, vertical=False) -> int | None:
 
 
 def _number_format(fmt: str) -> str:
+    """将 openpyxl 数字格式映射到编辑器内部键，未知格式直接透传原字符串。"""
     normalized = (fmt or "General").lower()
     if normalized == "general": return "general"
     if normalized == "@": return "text"
     if "%" in normalized: return "percent"
     if any(token in normalized for token in ("yy", "dd", "mm-", "m/", "d/")): return "date"
+    if normalized == "#,##0.000" or normalized == "0.000": return "decimal_3"
     if any(token in normalized for token in (".0", ".#")): return "decimal_2"
     if any(token in normalized for token in ("0", "#")): return "integer"
-    return "general"
+    # 未知格式直接透传（如 "0.0000", "¥#,##0.00" 等自定义格式）
+    return fmt if fmt and fmt != "General" else "general"
 
 
 def _side(side):
