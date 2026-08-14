@@ -75,6 +75,14 @@ class QueryBinding:
     aggregate_func: str = ""            # 聚合函数: SUM/COUNT/AVG/MAX/MIN
     sql_mode: str = "builder"           # "builder" | "manual"
     custom_sql: str = ""                # 手动 SQL（sql_mode == "manual"）
+    sync_modes: bool = False             # 切换模式时自动同步可识别内容
+    distinct: bool = False
+    joins: list[dict] = field(default_factory=list)  # [{"type":"LEFT JOIN","table":"b x","on":"a.id=x.a_id"}]
+    select_fields: list[dict] = field(default_factory=list)  # [{"field":"a.x","aggregate":"SUM","alias":"total"}]
+    group_by: list[str] = field(default_factory=list)
+    having: str = ""
+    order_by: list[dict] = field(default_factory=list)  # [{"field":"total","direction":"DESC"}]
+    limit: Optional[int] = None
     filters: list[dict] = field(default_factory=list)  # 多条件 [{"connector":"where/and/or","field":"","op":"=","value":""}]
     date_placeholder: str = ""          # 日期占位符，如 "{date}"，运行时替换为选定日期
 
@@ -88,6 +96,14 @@ class QueryBinding:
             "aggregate_func": self.aggregate_func,
             "sql_mode": self.sql_mode,
             "custom_sql": self.custom_sql,
+            "sync_modes": self.sync_modes,
+            "distinct": self.distinct,
+            "joins": self.joins,
+            "select_fields": self.select_fields,
+            "group_by": self.group_by,
+            "having": self.having,
+            "order_by": self.order_by,
+            "limit": self.limit,
             "filters": self.filters,
             "date_placeholder": self.date_placeholder,
         }
@@ -103,6 +119,14 @@ class QueryBinding:
             aggregate_func=data.get("aggregate_func", ""),
             sql_mode=data.get("sql_mode", "builder"),
             custom_sql=data.get("custom_sql", ""),
+            sync_modes=data.get("sync_modes", False),
+            distinct=data.get("distinct", False),
+            joins=data.get("joins", []),
+            select_fields=data.get("select_fields", []),
+            group_by=data.get("group_by", []),
+            having=data.get("having", ""),
+            order_by=data.get("order_by", []),
+            limit=data.get("limit"),
             filters=data.get("filters", []),
             date_placeholder=data.get("date_placeholder", ""),
         )
@@ -129,14 +153,27 @@ class QueryBinding:
             return ""
         if self.sql_mode == "manual":
             return self.custom_sql.strip()
-        if not self.table_name or not self.field_name:
+        if not self.table_name or (not self.field_name and not self.select_fields):
             return ""
 
-        field_expr = self.field_name
-        if self.query_type == QueryType.AGGREGATE and self.aggregate_func:
-            field_expr = f"{self.aggregate_func}({self.field_name})"
+        expressions = []
+        fields = self.select_fields or [{"field": self.field_name,
+                                         "aggregate": self.aggregate_func if self.query_type == QueryType.AGGREGATE else "",
+                                         "alias": ""}]
+        for item in fields:
+            name = item.get("field", "").strip()
+            if not name: continue
+            agg = item.get("aggregate", "").strip().upper()
+            expr = f"{agg}({name})" if agg else name
+            if item.get("alias", "").strip(): expr += f" AS {item['alias'].strip()}"
+            expressions.append(expr)
+        if not expressions:
+            return ""
 
-        sql = f"SELECT {field_expr} FROM {self.table_name}"
+        sql = f"SELECT {'DISTINCT ' if self.distinct else ''}{', '.join(expressions)} FROM {self.table_name}"
+        for join in self.joins:
+            if join.get("table") and join.get("on"):
+                sql += f" {join.get('type', 'LEFT JOIN').upper()} {join['table']} ON {join['on']}"
 
         parts = []
         for i, f in enumerate(self.filters):
@@ -153,6 +190,16 @@ class QueryBinding:
 
         if parts:
             sql += " " + " ".join(parts)
+        if self.group_by:
+            sql += " GROUP BY " + ", ".join(x for x in self.group_by if x)
+        if self.having.strip():
+            sql += " HAVING " + self.having.strip()
+        if self.order_by:
+            orders = [f"{x.get('field')} {x.get('direction', 'ASC').upper()}"
+                      for x in self.order_by if x.get("field")]
+            if orders: sql += " ORDER BY " + ", ".join(orders)
+        if self.limit is not None and int(self.limit) > 0:
+            sql += f" LIMIT {int(self.limit)}"
         return sql
 
 
@@ -177,13 +224,16 @@ def parse_sql_to_binding(sql: str) -> dict:
 
     返回 {"field":..., "table":..., "aggregate":..., "filters":[...]}。
     """
-    result = {"field": "", "table": "", "aggregate": "", "filters": []}
+    result = {"field": "", "table": "", "aggregate": "", "filters": [], "safe": False}
     sql = (sql or "").strip().rstrip(";").strip()
     if not sql:
         return result
 
     m = re.match(r"SELECT\s+(.+?)\s+FROM\s+(\S+)", sql, re.IGNORECASE)
     if not m:
+        return result
+    # 可视化构建器不能无损表达子查询、UNION、CTE；拒绝回填以保护原 SQL。
+    if re.search(r"\b(UNION|WITH|INTERSECT|EXCEPT)\b|\(\s*SELECT\b", sql, re.I):
         return result
     field_expr = m.group(1).strip()
     result["table"] = m.group(2)
@@ -195,8 +245,9 @@ def parse_sql_to_binding(sql: str) -> dict:
     else:
         result["field"] = field_expr
 
-    where_m = re.search(r"\bWHERE\b(.+)$", sql, re.IGNORECASE)
+    where_m = re.search(r"\bWHERE\b(.+?)(?=\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|$)", sql, re.I | re.S)
     if not where_m:
+        result["safe"] = not bool(re.search(r"\bJOIN\b", sql, re.I))
         return result
     where_clause = where_m.group(1).strip()
 
@@ -213,4 +264,5 @@ def parse_sql_to_binding(sql: str) -> dict:
             filters.append(cond)
             connector = "and"
     result["filters"] = filters
+    result["safe"] = not bool(re.search(r"\bJOIN\b", sql, re.I))
     return result

@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QPushButton, QButtonGroup,
     QColorDialog, QFrame, QSizePolicy, QScrollArea, QToolBox,
-    QTextEdit, QLineEdit, QTabWidget,
+    QTextEdit, QLineEdit, QTabWidget, QListWidget, QListWidgetItem, QCompleter,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFontDatabase
@@ -36,9 +36,11 @@ class StylePanel(QScrollArea):
     style_changed = pyqtSignal()  # 通知外部刷新预览
     style_transaction = pyqtSignal(object)  # 一次可撤销的批量样式变更
 
-    def __init__(self, template: TemplateModel, parent=None):
+    def __init__(self, template: TemplateModel, parent=None, metadata_provider=None):
         super().__init__(parent)
         self._template = template
+        self._metadata_provider = metadata_provider
+        self._db_metadata: dict[str, list[str]] = {}
         self._current_scope = StyleScope.DEFAULT
         self._current_row = -1
         self._current_col = -1
@@ -251,8 +253,12 @@ class StylePanel(QScrollArea):
         lay.addWidget(border_grp)
 
         # --- 数字格式（两级设置，类 Excel）---
-        nf_grp = QGroupBox("数字格式")
-        nf_lay = QVBoxLayout(nf_grp)
+        self._nf_grp = QGroupBox("数字格式")
+        nf_lay = QVBoxLayout(self._nf_grp)
+        self._lbl_nf_db_lock = QLabel("已启用数据库查询")
+        self._lbl_nf_db_lock.setStyleSheet("color:#B06000; font-weight:bold;")
+        self._lbl_nf_db_lock.hide()
+        nf_lay.addWidget(self._lbl_nf_db_lock)
         # 第一级：类别
         cat_row = QHBoxLayout()
         cat_row.addWidget(QLabel("类别:"))
@@ -307,7 +313,7 @@ class StylePanel(QScrollArea):
         # 默认：常规 → 显示提示
         self._on_number_cat_changed(0)
 
-        lay.addWidget(nf_grp)
+        lay.addWidget(self._nf_grp)
 
         lay.addStretch()
         self._toolbox.addItem(page, "📐  字体 / 样式 / 边框")
@@ -334,6 +340,10 @@ class StylePanel(QScrollArea):
         self._cmb_sql_mode.currentIndexChanged.connect(self._on_sql_mode_changed)
         mode_row.addWidget(self._cmb_sql_mode, 1)
         lay.addLayout(mode_row)
+        self._chk_sql_sync = QCheckBox("自动同步两种查询方式")
+        self._chk_sql_sync.setToolTip("开启后：切换到 SQL 会自动生成；切回可视化时仅同步可安全解析的简单 SQL")
+        self._chk_sql_sync.stateChanged.connect(self._on_db_config_changed)
+        lay.addWidget(self._chk_sql_sync)
 
         # 条件构建模式容器
         self._builder_widget = QWidget()
@@ -345,33 +355,97 @@ class StylePanel(QScrollArea):
         qt_row.addWidget(QLabel("查询类型:"))
         self._cmb_query_type = QComboBox()
         self._cmb_query_type.addItems(["单值查询", "聚合查询"])
-        self._cmb_query_type.currentIndexChanged.connect(self._on_db_config_changed)
+        self._cmb_query_type.currentIndexChanged.connect(self._on_query_type_changed)
         qt_row.addWidget(self._cmb_query_type, 1)
         bl.addLayout(qt_row)
 
-        agg_row = QHBoxLayout()
+        self._agg_widget = QWidget()
+        agg_row = QHBoxLayout(self._agg_widget)
+        agg_row.setContentsMargins(0, 0, 0, 0)
         agg_row.addWidget(QLabel("聚合:"))
         self._cmb_aggregate = QComboBox()
         self._cmb_aggregate.addItems(["SUM", "COUNT", "AVG", "MAX", "MIN"])
         self._cmb_aggregate.currentIndexChanged.connect(self._on_db_config_changed)
         agg_row.addWidget(self._cmb_aggregate, 1)
-        bl.addLayout(agg_row)
+        bl.addWidget(self._agg_widget)
 
         tbl_row = QHBoxLayout()
         tbl_row.addWidget(QLabel("数据表:"))
-        self._txt_table = QLineEdit()
-        self._txt_table.setPlaceholderText("如: daily_production")
+        self._cmb_table = QComboBox(); self._cmb_table.setEditable(True)
+        self._txt_table = self._cmb_table.lineEdit()
+        self._txt_table.setPlaceholderText("选择或输入数据表")
         self._txt_table.textChanged.connect(self._on_db_config_changed)
-        tbl_row.addWidget(self._txt_table, 1)
+        self._cmb_table.currentTextChanged.connect(self._on_source_table_changed)
+        tbl_row.addWidget(self._cmb_table, 1)
+        self._btn_refresh_metadata = QPushButton("读取数据库")
+        self._btn_refresh_metadata.clicked.connect(self._refresh_db_metadata)
+        tbl_row.addWidget(self._btn_refresh_metadata)
         bl.addLayout(tbl_row)
+        self._lbl_metadata_state = QLabel("尚未读取数据库结构；仍可直接输入")
+        self._lbl_metadata_state.setStyleSheet("color:#777;")
+        bl.addWidget(self._lbl_metadata_state)
 
         fld_row = QHBoxLayout()
         fld_row.addWidget(QLabel("字段:"))
-        self._txt_field = QLineEdit()
-        self._txt_field.setPlaceholderText("如: output_volume")
+        self._cmb_field = QComboBox(); self._cmb_field.setEditable(True)
+        self._txt_field = self._cmb_field.lineEdit()
+        self._txt_field.setPlaceholderText("选择或输入返回字段")
         self._txt_field.textChanged.connect(self._on_db_config_changed)
-        fld_row.addWidget(self._txt_field, 1)
+        fld_row.addWidget(self._cmb_field, 1)
         bl.addLayout(fld_row)
+
+        self._result_options_grp = QGroupBox("返回结果设置")
+        result_options_lay = QVBoxLayout(self._result_options_grp)
+        self._chk_distinct = QCheckBox("结果去重（删除完全重复的结果行）")
+        self._chk_distinct.stateChanged.connect(self._on_db_config_changed)
+        result_options_lay.addWidget(self._chk_distinct)
+
+        result_options_lay.addWidget(QLabel("多字段返回（可选；添加后替代上面的主返回字段）:"))
+        select_row = QHBoxLayout()
+        self._cmb_select_field = QComboBox(); self._cmb_select_field.setEditable(True)
+        self._cmb_select_field.lineEdit().setPlaceholderText("选择或输入字段")
+        self._cmb_select_aggregate = QComboBox()
+        self._cmb_select_aggregate.addItems(["不聚合", "SUM", "COUNT", "AVG", "MAX", "MIN"])
+        self._txt_select_alias = QLineEdit(); self._txt_select_alias.setPlaceholderText("别名（可选）")
+        select_row.addWidget(self._cmb_select_field, 1)
+        select_row.addWidget(self._cmb_select_aggregate)
+        select_row.addWidget(self._txt_select_alias, 1)
+        result_options_lay.addLayout(select_row)
+        select_btn_row = QHBoxLayout()
+        btn_add_select = QPushButton("添加返回字段")
+        btn_add_select.clicked.connect(self._add_select_field)
+        btn_remove_select = QPushButton("删除所选")
+        btn_remove_select.clicked.connect(self._remove_select_field)
+        select_btn_row.addWidget(btn_add_select); select_btn_row.addWidget(btn_remove_select)
+        select_btn_row.addStretch(); result_options_lay.addLayout(select_btn_row)
+        self._lst_select_fields = QListWidget(); self._lst_select_fields.setFixedHeight(70)
+        result_options_lay.addWidget(self._lst_select_fields)
+        bl.addWidget(self._result_options_grp)
+
+        self._chk_use_joins = QCheckBox("启用关联表")
+        self._chk_use_joins.stateChanged.connect(self._on_optional_query_changed)
+        bl.addWidget(self._chk_use_joins)
+        self._lbl_joins = QLabel("关联方式（主表字段 = 关联表字段）:")
+        bl.addWidget(self._lbl_joins)
+        self._join_widget = QWidget(); join_lay = QVBoxLayout(self._join_widget)
+        join_lay.setContentsMargins(0, 0, 0, 0)
+        join_top = QHBoxLayout()
+        self._cmb_join_type = QComboBox(); self._cmb_join_type.addItems(
+            ["LEFT JOIN", "INNER JOIN", "RIGHT JOIN", "FULL JOIN"])
+        self._cmb_join_table = QComboBox(); self._cmb_join_table.setEditable(True)
+        self._cmb_join_table.lineEdit().setPlaceholderText("选择或输入关联表")
+        join_top.addWidget(self._cmb_join_type); join_top.addWidget(self._cmb_join_table, 1)
+        join_lay.addLayout(join_top)
+        join_fields = QHBoxLayout()
+        self._cmb_join_left = QComboBox(); self._cmb_join_left.setEditable(True)
+        self._cmb_join_right = QComboBox(); self._cmb_join_right.setEditable(True)
+        join_fields.addWidget(self._cmb_join_left, 1); join_fields.addWidget(QLabel("="))
+        join_fields.addWidget(self._cmb_join_right, 1); join_lay.addLayout(join_fields)
+        for combo in (self._cmb_join_type, self._cmb_join_table,
+                      self._cmb_join_left, self._cmb_join_right):
+            combo.currentTextChanged.connect(self._on_db_config_changed)
+        self._cmb_join_table.currentTextChanged.connect(self._refresh_identifier_choices)
+        bl.addWidget(self._join_widget)
 
         dp_row = QHBoxLayout()
         dp_row.addWidget(QLabel("日期占位符:"))
@@ -398,6 +472,32 @@ class StylePanel(QScrollArea):
         btn_row.addStretch()
         bl.addLayout(btn_row)
 
+        self._chk_use_group = QCheckBox("启用分组 / HAVING")
+        self._chk_use_group.stateChanged.connect(self._on_optional_query_changed)
+        bl.addWidget(self._chk_use_group)
+        self._cmb_group_by = QComboBox(); self._cmb_group_by.setEditable(True)
+        self._cmb_group_by.lineEdit().setPlaceholderText("选择或输入分组字段")
+        bl.addWidget(self._cmb_group_by)
+        self._txt_having = QLineEdit(); self._txt_having.setPlaceholderText("聚合筛选 HAVING，如 SUM(p.output) > 100")
+        self._txt_having.textChanged.connect(self._on_db_config_changed)
+        bl.addWidget(self._txt_having)
+        self._chk_use_order = QCheckBox("启用排序")
+        self._chk_use_order.stateChanged.connect(self._on_optional_query_changed)
+        bl.addWidget(self._chk_use_order)
+        order_row = QHBoxLayout()
+        self._cmb_order_field = QComboBox(); self._cmb_order_field.setEditable(True)
+        self._cmb_order_field.lineEdit().setPlaceholderText("选择或输入排序字段")
+        self._cmb_order_direction = QComboBox(); self._cmb_order_direction.addItems(["升序 ASC", "降序 DESC"])
+        order_row.addWidget(self._cmb_order_field, 1); order_row.addWidget(self._cmb_order_direction)
+        bl.addLayout(order_row)
+        limit_row = QHBoxLayout(); limit_row.addWidget(QLabel("最多返回:"))
+        self._spn_query_limit = QSpinBox(); self._spn_query_limit.setRange(0, 1000000); self._spn_query_limit.setSpecialValueText("不限制")
+        self._spn_query_limit.valueChanged.connect(self._on_db_config_changed)
+        limit_row.addWidget(self._spn_query_limit); limit_row.addStretch(); bl.addLayout(limit_row)
+        self._cmb_group_by.currentTextChanged.connect(self._on_db_config_changed)
+        self._cmb_order_field.currentTextChanged.connect(self._on_db_config_changed)
+        self._cmb_order_direction.currentIndexChanged.connect(self._on_db_config_changed)
+
         lay.addWidget(self._builder_widget)
 
         # 手动 SQL 模式容器
@@ -410,6 +510,9 @@ class StylePanel(QScrollArea):
         self._txt_custom_sql.setPlaceholderText("SELECT ... FROM ... WHERE ...")
         self._txt_custom_sql.textChanged.connect(self._on_manual_sql_changed)
         ml.addWidget(self._txt_custom_sql)
+        btn_generate_sql = QPushButton("根据可视化条件生成 / 更新 SQL")
+        btn_generate_sql.clicked.connect(self._generate_manual_sql)
+        ml.addWidget(btn_generate_sql)
         lay.addWidget(self._manual_widget)
 
         # SQL 预览（互通）
@@ -431,6 +534,7 @@ class StylePanel(QScrollArea):
         self._filter_rows: list[dict] = []
         self._add_filter_row()
         self._on_sql_mode_changed(0)
+        self._update_db_ui_state()
 
     # ==================================================================
     # 应用范围按钮
@@ -679,6 +783,11 @@ class StylePanel(QScrollArea):
         self._cmb_sql_mode.blockSignals(True)
         self._cmb_sql_mode.setCurrentIndex(1 if qb.sql_mode == "manual" else 0)
         self._cmb_sql_mode.blockSignals(False)
+        self._chk_sql_sync.setChecked(qb.sync_modes)
+        self._chk_distinct.setChecked(qb.distinct)
+        self._chk_use_joins.setChecked(bool(qb.joins))
+        self._chk_use_group.setChecked(bool(qb.group_by or qb.having))
+        self._chk_use_order.setChecked(bool(qb.order_by))
 
         self._cmb_query_type.blockSignals(True)
         self._cmb_query_type.setCurrentIndex(0 if qb.query_type == QueryType.SINGLE else 1)
@@ -697,6 +806,21 @@ class StylePanel(QScrollArea):
         self._txt_field.blockSignals(True)
         self._txt_field.setText(qb.field_name)
         self._txt_field.blockSignals(False)
+        self._lst_select_fields.clear()
+        for field_info in qb.select_fields:
+            self._append_select_field_item(field_info)
+        join = qb.joins[0] if qb.joins else {}
+        self._cmb_join_type.setCurrentText(join.get("type", "LEFT JOIN"))
+        self._cmb_join_table.setCurrentText(join.get("table", ""))
+        on_parts = join.get("on", "").split("=", 1)
+        self._cmb_join_left.setCurrentText(on_parts[0].strip() if on_parts else "")
+        self._cmb_join_right.setCurrentText(on_parts[1].strip() if len(on_parts) > 1 else "")
+        self._cmb_group_by.setCurrentText(", ".join(qb.group_by))
+        self._txt_having.setText(qb.having)
+        order = qb.order_by[0] if qb.order_by else {}
+        self._cmb_order_field.setCurrentText(order.get("field", ""))
+        self._cmb_order_direction.setCurrentIndex(1 if order.get("direction") == "DESC" else 0)
+        self._spn_query_limit.setValue(qb.limit or 0)
 
         self._txt_date_ph.blockSignals(True)
         self._txt_date_ph.setText(qb.date_placeholder)
@@ -726,6 +850,7 @@ class StylePanel(QScrollArea):
 
         self._suppress_update = False
         self._on_sql_mode_changed(self._cmb_sql_mode.currentIndex())
+        self._update_db_ui_state()
         self._update_sql_preview()
 
     def _get_current_style(self):
@@ -830,6 +955,29 @@ class StylePanel(QScrollArea):
         qb.field_name = self._txt_field.text().strip()
         qb.date_placeholder = self._txt_date_ph.text().strip()
         qb.custom_sql = self._txt_custom_sql.toPlainText().strip()
+        qb.sync_modes = self._chk_sql_sync.isChecked()
+        qb.distinct = self._chk_distinct.isChecked()
+        qb.select_fields = []
+        for index in range(self._lst_select_fields.count()):
+            qb.select_fields.append(dict(self._lst_select_fields.item(index).data(Qt.ItemDataRole.UserRole)))
+        qb.joins = []
+        if self._chk_use_joins.isChecked():
+            join_table = self._cmb_join_table.currentText().strip()
+            left = self._cmb_join_left.currentText().strip()
+            right = self._cmb_join_right.currentText().strip()
+            if join_table and left and right:
+                qb.joins.append({"type": self._cmb_join_type.currentText(),
+                                 "table": join_table, "on": f"{left} = {right}"})
+        qb.group_by = ([x.strip() for x in self._cmb_group_by.currentText().split(",") if x.strip()]
+                       if self._chk_use_group.isChecked() else [])
+        qb.having = self._txt_having.text().strip() if self._chk_use_group.isChecked() else ""
+        qb.order_by = []
+        if self._chk_use_order.isChecked():
+            field = self._cmb_order_field.currentText().strip()
+            if field:
+                qb.order_by.append({"field": field,
+                                    "direction": "DESC" if self._cmb_order_direction.currentIndex() else "ASC"})
+        qb.limit = self._spn_query_limit.value() or None
 
         # 收集条件行
         filters = []
@@ -1051,14 +1199,146 @@ class StylePanel(QScrollArea):
         else:
             self._lbl_nf_hint.setText("无任何特定数字格式" if cat == "常规" else "文本格式")
             self._lbl_nf_hint.show()
-        if not self._suppress_update:
+        if (not self._suppress_update
+                and not (hasattr(self, "_chk_db_enabled") and self._chk_db_enabled.isChecked())):
             self._apply_style(CellStyle(number_format=self._collect_number_format()))
 
     def _on_number_format_changed(self):
+        if hasattr(self, "_chk_db_enabled") and self._chk_db_enabled.isChecked():
+            return
         self._apply_style(CellStyle(number_format=self._collect_number_format()))
 
     def _on_db_enabled_changed(self, _state):
+        self._update_db_ui_state()
+        if self._chk_db_enabled.isChecked() and not self._db_metadata:
+            self._refresh_db_metadata()
         self._apply_db_binding()
+
+    @staticmethod
+    def _set_combo_choices(combo: QComboBox, choices: list[str]):
+        current = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(choices)
+        combo.setCurrentText(current)
+        if combo.isEditable() and combo.completer():
+            combo.completer().setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            combo.completer().setFilterMode(Qt.MatchFlag.MatchContains)
+            combo.completer().setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        combo.blockSignals(False)
+
+    def _refresh_db_metadata(self):
+        provider = self._metadata_provider
+        metadata = provider("default") if provider else {}
+        self._db_metadata = metadata or {}
+        tables = sorted(self._db_metadata, key=str.lower)
+        self._set_combo_choices(self._cmb_table, tables)
+        self._set_combo_choices(self._cmb_join_table, tables)
+        self._refresh_identifier_choices()
+        if tables:
+            column_count = sum(len(items) for items in self._db_metadata.values())
+            self._lbl_metadata_state.setText(
+                f"已读取 {len(tables)} 个数据表、{column_count} 个字段；可输入文字筛选")
+            self._lbl_metadata_state.setStyleSheet("color:#287A3D;")
+        else:
+            self._lbl_metadata_state.setText("未读取到数据库结构；下拉栏为空，但仍可手动输入")
+            self._lbl_metadata_state.setStyleSheet("color:#B06000;")
+
+    def _on_source_table_changed(self, _text=""):
+        self._refresh_identifier_choices()
+
+    def _refresh_identifier_choices(self, _text=""):
+        source_parts = self._cmb_table.currentText().strip().split()
+        joined_parts = self._cmb_join_table.currentText().strip().split()
+        source = source_parts[0] if source_parts else ""
+        joined = joined_parts[0] if joined_parts else ""
+        source_columns = self._db_metadata.get(source, [])
+        joined_columns = self._db_metadata.get(joined, [])
+        source_alias = source_parts[-1] if source_parts else ""
+        join_alias = joined_parts[-1] if joined_parts else ""
+        all_fields = list(source_columns)
+        qualified_source = [f"{source_alias}.{name}" for name in source_columns]
+        qualified_join = [f"{join_alias}.{name}" for name in joined_columns]
+        all_qualified = qualified_source + qualified_join
+        self._set_combo_choices(self._cmb_field, all_fields)
+        self._set_combo_choices(self._cmb_join_left, qualified_source)
+        self._set_combo_choices(self._cmb_join_right, qualified_join)
+        self._set_combo_choices(self._cmb_group_by, all_qualified or all_fields)
+        self._set_combo_choices(self._cmb_order_field, all_qualified or all_fields)
+        self._set_combo_choices(self._cmb_select_field, all_qualified or all_fields)
+        for row in self._filter_rows:
+            self._set_combo_choices(row["field_combo"], all_qualified or all_fields)
+
+    def _append_select_field_item(self, info: dict):
+        field = info.get("field", "").strip()
+        if not field:
+            return
+        aggregate = info.get("aggregate", "").strip().upper()
+        alias = info.get("alias", "").strip()
+        expression = f"{aggregate}({field})" if aggregate else field
+        item = QListWidgetItem(expression + (f"  →  {alias}" if alias else ""))
+        item.setData(Qt.ItemDataRole.UserRole,
+                     {"field": field, "aggregate": aggregate, "alias": alias})
+        self._lst_select_fields.addItem(item)
+
+    def _add_select_field(self):
+        self._append_select_field_item({
+            "field": self._cmb_select_field.currentText(),
+            "aggregate": ("" if self._cmb_select_aggregate.currentIndex() == 0
+                          else self._cmb_select_aggregate.currentText()),
+            "alias": self._txt_select_alias.text(),
+        })
+        self._txt_select_alias.clear()
+        self._apply_db_binding()
+
+    def _remove_select_field(self):
+        row = self._lst_select_fields.currentRow()
+        if row >= 0:
+            self._lst_select_fields.takeItem(row)
+            self._apply_db_binding()
+
+    def _on_query_type_changed(self, _idx):
+        self._update_db_ui_state()
+        self._apply_db_binding()
+
+    def _on_optional_query_changed(self, _state):
+        self._update_db_ui_state()
+        self._apply_db_binding()
+
+    def _update_db_ui_state(self):
+        """Keep database-query controls visually consistent with their switches."""
+        enabled = self._chk_db_enabled.isChecked()
+
+        self._cmb_sql_mode.setEnabled(enabled)
+        self._chk_sql_sync.setEnabled(enabled)
+        self._builder_widget.setEnabled(enabled)
+        self._manual_widget.setEnabled(enabled)
+
+        # A single-value query has no global aggregation step.  Hiding this row
+        # keeps the form focused while retaining the setting for aggregate mode.
+        self._agg_widget.setVisible(self._cmb_query_type.currentIndex() == 1)
+
+        for checkbox in (self._chk_use_joins, self._chk_use_group, self._chk_use_order):
+            checkbox.setEnabled(enabled)
+
+        use_joins = enabled and self._chk_use_joins.isChecked()
+        self._lbl_joins.setEnabled(use_joins)
+        self._join_widget.setEnabled(use_joins)
+
+        use_group = enabled and self._chk_use_group.isChecked()
+        self._cmb_group_by.setEnabled(use_group)
+        self._txt_having.setEnabled(use_group)
+
+        use_order = enabled and self._chk_use_order.isChecked()
+        self._cmb_order_field.setEnabled(use_order)
+        self._cmb_order_direction.setEnabled(use_order)
+
+        # Keep the group title and explanation readable; only the editable
+        # number-format controls are locked while the cell is database-driven.
+        self._cmb_number_cat.setEnabled(not enabled)
+        self._nf_sub_widget.setEnabled(not enabled)
+        self._lbl_nf_db_lock.setVisible(enabled)
+        self._nf_grp.setToolTip("已启用数据库查询" if enabled else "")
 
     def _on_db_config_changed(self):
         self._apply_db_binding()
@@ -1083,8 +1363,9 @@ class StylePanel(QScrollArea):
         else:
             connector.addItems(["and", "or"])
 
-        field = QLineEdit()
-        field.setPlaceholderText("字段")
+        field_combo = QComboBox(); field_combo.setEditable(True)
+        field = field_combo.lineEdit()
+        field.setPlaceholderText("选择或输入筛选字段")
 
         op = QComboBox()
         op.addItems([SQL_OPERATOR_LABELS[o] for o in SQL_OPERATORS])
@@ -1094,14 +1375,18 @@ class StylePanel(QScrollArea):
         value.setPlaceholderText("值")
 
         h.addWidget(connector)
-        h.addWidget(field, 1)
+        h.addWidget(field_combo, 1)
         h.addWidget(op)
         h.addWidget(value, 1)
 
         self._filters_layout.addWidget(row)
         self._filter_rows.append(
-            {"widget": row, "connector": connector, "field": field, "op": op, "value": value}
+            {"widget": row, "connector": connector, "field": field,
+             "field_combo": field_combo, "op": op, "value": value}
         )
+
+        if self._db_metadata:
+            self._refresh_identifier_choices()
 
         field.textChanged.connect(self._on_db_config_changed)
         op.currentIndexChanged.connect(self._on_db_config_changed)
@@ -1122,8 +1407,12 @@ class StylePanel(QScrollArea):
     def _parse_sql_to_filters(self, sql: str):
         """手动 SQL → 条件构建器（反向互通）。"""
         info = parse_sql_to_binding(sql)
+        if not info.get("safe"):
+            self._lbl_sql_validate.setText("⚠ 此 SQL 含 JOIN、子查询、UNION 或其他复杂结构，已保留原 SQL，未覆盖可视化条件")
+            self._lbl_sql_validate.setStyleSheet("color:#B06000;")
+            return False
         if not info.get("field") and not info.get("filters"):
-            return
+            return False
         self._txt_table.blockSignals(True)
         self._txt_table.setText(info.get("table", ""))
         self._txt_table.blockSignals(False)
@@ -1150,6 +1439,17 @@ class StylePanel(QScrollArea):
             fr["value"].setText(f.get("value", ""))
         if not self._filter_rows:
             self._add_filter_row()
+        return True
+
+    def _generate_manual_sql(self):
+        qb = self._collect_db_binding()
+        qb.sql_mode = "builder"
+        sql = qb.build_sql("{date}")
+        if sql:
+            self._txt_custom_sql.blockSignals(True)
+            self._txt_custom_sql.setPlainText(sql)
+            self._txt_custom_sql.blockSignals(False)
+            self._apply_db_binding()
 
     def _on_sql_mode_changed(self, idx: int):
         """切换编写方式，并在两种方式之间互通。"""
@@ -1158,7 +1458,7 @@ class StylePanel(QScrollArea):
             self._builder_widget.hide()
             self._manual_widget.show()
             # 条件构建 → 手动 SQL：自动生成 SQL 填入（若手动框为空）
-            if not self._txt_custom_sql.toPlainText().strip():
+            if self._chk_sql_sync.isChecked() or not self._txt_custom_sql.toPlainText().strip():
                 qb = self._collect_db_binding()
                 qb.sql_mode = "builder"
                 sql = qb.build_sql("2026-01-01")
@@ -1171,8 +1471,9 @@ class StylePanel(QScrollArea):
             self._builder_widget.show()
             # 手动 SQL → 条件构建：解析 SQL 填充条件
             sql = self._txt_custom_sql.toPlainText().strip()
-            if sql:
+            if sql and self._chk_sql_sync.isChecked():
                 self._parse_sql_to_filters(sql)
+        self._update_db_ui_state()
         if not self._suppress_update:
             self._update_sql_preview()
 

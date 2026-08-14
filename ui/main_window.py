@@ -212,7 +212,7 @@ class MainWindow(QMainWindow):
         # UI 组件
         self._formula_bar = FormulaBar()
         self._preview = PreviewTable(self._template, is_admin=True)
-        self._style_panel = StylePanel(self._template)
+        self._style_panel = StylePanel(self._template, metadata_provider=self._get_db_metadata)
 
         self._setup_menu()
         self._setup_toolbar()
@@ -1208,6 +1208,14 @@ class MainWindow(QMainWindow):
     # ==================================================================
     # 数据库配置
     # ==================================================================
+    def _get_db_metadata(self, config_key: str = "default") -> dict[str, list[str]]:
+        """Connect when possible and expose tables/columns to the query builder."""
+        if not self._db_handler.is_connected(config_key):
+            config = self._template.db_configs.get(config_key)
+            if not config or not self._db_handler.connect(config, config_key):
+                return {}
+        return self._db_handler.get_schema_metadata(config_key)
+
     def _db_config(self):
         """数据库连接配置。"""
         dlg = _DbConfigDialog(self)
