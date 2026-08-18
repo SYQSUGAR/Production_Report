@@ -4,27 +4,27 @@ from models.db_config import QueryBinding, QueryType, parse_sql_to_binding
 
 
 class QueryBuilderTest(unittest.TestCase):
-    def test_multi_table_aggregate_query(self):
+    def test_aggregate_query_with_join_and_filters(self):
         binding = QueryBinding(
-            enabled=True, table_name="production p", distinct=True,
-            select_fields=[
-                {"field": "s.name", "aggregate": "", "alias": "station_name"},
-                {"field": "p.output", "aggregate": "SUM", "alias": "total_output"},
-            ],
+            enabled=True, query_type=QueryType.AGGREGATE,
+            table_name="production p", field_name="p.output", aggregate_func="SUM",
             joins=[{"type": "LEFT JOIN", "table": "station s", "on": "p.station_id = s.id"}],
             filters=[
                 {"connector": "where", "field": "p.record_date", "op": "=", "value": "{date}"},
                 {"connector": "and", "field": "s.region", "op": "LIKE", "value": "东区"},
             ],
-            group_by=["s.name"], having="SUM(p.output) > 100",
-            order_by=[{"field": "total_output", "direction": "DESC"}], limit=10,
         )
         sql = binding.build_sql("2026-08-13")
-        self.assertEqual(sql, "SELECT DISTINCT s.name AS station_name, SUM(p.output) AS total_output "
-                              "FROM production p LEFT JOIN station s ON p.station_id = s.id "
-                              "WHERE p.record_date = '2026-08-13' AND s.region LIKE '%东区%' "
-                              "GROUP BY s.name HAVING SUM(p.output) > 100 "
-                              "ORDER BY total_output DESC LIMIT 10")
+        self.assertEqual(sql, "SELECT SUM(p.output) FROM production p "
+                              "LEFT JOIN station s ON p.station_id = s.id "
+                              "WHERE p.record_date = '2026-08-13' AND s.region LIKE '%东区%'")
+
+    def test_single_value_query(self):
+        binding = QueryBinding(
+            enabled=True, query_type=QueryType.SINGLE,
+            table_name="daily", field_name="output",
+        )
+        self.assertEqual(binding.build_sql(), "SELECT output FROM daily")
 
     def test_old_binding_remains_compatible(self):
         binding = QueryBinding.from_dict({"enabled": True, "query_type": "aggregate",
@@ -44,12 +44,13 @@ class QueryBuilderTest(unittest.TestCase):
         self.assertFalse(join["safe"])
         self.assertFalse(subquery["safe"])
 
-    def test_round_trip_new_fields(self):
-        original = QueryBinding(enabled=True, sync_modes=True, distinct=True,
-                                joins=[{"type": "INNER JOIN", "table": "b", "on": "a.id=b.id"}],
-                                select_fields=[{"field": "a.x", "aggregate": "MAX", "alias": "m"}],
-                                group_by=["a.k"], having="MAX(a.x)>0",
-                                order_by=[{"field": "m", "direction": "DESC"}], limit=5)
+    def test_round_trip(self):
+        original = QueryBinding(
+            enabled=True, query_type=QueryType.AGGREGATE, sync_modes=True,
+            table_name="a", field_name="a.x", aggregate_func="MAX",
+            joins=[{"type": "INNER JOIN", "table": "b", "on": "a.id=b.id"}],
+            filters=[{"connector": "where", "field": "a.k", "op": ">", "value": "0"}],
+        )
         restored = QueryBinding.from_dict(original.to_dict())
         self.assertEqual(restored.to_dict(), original.to_dict())
 

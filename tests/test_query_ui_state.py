@@ -45,31 +45,18 @@ class QueryUiStateTest(unittest.TestCase):
     def test_optional_sections_require_their_own_switches(self):
         self.panel._chk_db_enabled.setChecked(True)
         self.assertFalse(self.panel._join_widget.isEnabled())
-        self.assertFalse(self.panel._cmb_group_by.isEnabled())
-        self.assertFalse(self.panel._cmb_order_field.isEnabled())
 
         self.panel._cmb_join_table.setCurrentText("detail d")
         self.panel._cmb_join_left.setCurrentText("m.id")
         self.panel._cmb_join_right.setCurrentText("d.id")
-        self.panel._cmb_group_by.setCurrentText("m.category")
-        self.panel._cmb_order_field.setCurrentText("m.created_at")
-        self.panel._cmb_order_direction.setCurrentIndex(1)
         binding = self.panel._collect_db_binding()
         self.assertEqual(binding.joins, [])
-        self.assertEqual(binding.group_by, [])
-        self.assertEqual(binding.order_by, [])
 
         self.panel._chk_use_joins.setChecked(True)
-        self.panel._chk_use_group.setChecked(True)
-        self.panel._chk_use_order.setChecked(True)
         self.assertTrue(self.panel._join_widget.isEnabled())
-        self.assertTrue(self.panel._cmb_group_by.isEnabled())
-        self.assertTrue(self.panel._cmb_order_field.isEnabled())
 
         binding = self.panel._collect_db_binding()
         self.assertEqual(binding.joins[0]["table"], "detail d")
-        self.assertEqual(binding.group_by, ["m.category"])
-        self.assertEqual(binding.order_by[0]["direction"], "DESC")
 
     def test_metadata_populates_editable_identifier_choices(self):
         self.panel._metadata_provider = lambda _key: {
