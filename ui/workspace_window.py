@@ -9,7 +9,7 @@ from ui.time_binding_panel import TimeBindingPanel
 
 
 class WorkspaceWindow(QMainWindow):
-    """把原模板编辑器保留为第一工作页，并新增报表预览工作页。"""
+    """把原模板编辑器保留为第一工作页，并新增只读报表预览工作页。"""
 
     def __init__(self):
         super().__init__()
@@ -65,8 +65,8 @@ class WorkspaceWindow(QMainWindow):
 
     def _on_tab_changed(self, index: int):
         if index == 1:
+            # 进入预览只同步模板，不自动查询；由用户点击“生成报表”执行查询。
             self._report_preview.sync_template()
-            self._report_preview.refresh_report()
 
     def closeEvent(self, event):
         # 原 MainWindow 作为子窗口嵌入后不会自然收到顶层 closeEvent，显式交给它处理。
