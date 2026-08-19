@@ -1,5 +1,6 @@
 """模板编辑页左右独立属性栏。"""
 
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QGroupBox, QPushButton
 
 from ui.style_panel import StylePanel
@@ -38,7 +39,6 @@ class StyleOnlyPanel(StylePanel):
 >>>>>>> fb7ea564cf4c851b81e6014b781451d387cb7801
         self._hide_legacy_actions()
 
-        # 数字格式与数据库查询彻底解耦。
         self._lbl_nf_db_lock.hide()
         self._cmb_number_cat.setEnabled(True)
         self._nf_sub_widget.setEnabled(True)
@@ -92,9 +92,12 @@ class StyleOnlyPanel(StylePanel):
 
 
 class DatabaseBindingPanel(StylePanel):
-    """右侧：仅保留数据库绑定和 SQL 编辑。"""
+    """右侧：数据库绑定和 SQL；多选时整批应用并一次撤销。"""
 
-    def __init__(self, template, parent=None, metadata_provider=None):
+    database_binding_changed = pyqtSignal()
+
+    def __init__(self, template, parent=None, metadata_provider=None, undo_manager=None):
+        self._undo_manager = undo_manager
         super().__init__(template, parent=parent, metadata_provider=metadata_provider)
         self.setMinimumWidth(380)
         self.setMaximumWidth(520)
@@ -128,6 +131,41 @@ class DatabaseBindingPanel(StylePanel):
     def refresh_sql_preview(self):
         self._update_sql_preview()
 
+    def _target_cells(self):
+        cells = list(dict.fromkeys(self._selected_cells or []))
+        if len(cells) > 1:
+            return cells
+        if self._current_row >= 0 and self._current_col >= 0:
+            return [(self._current_row, self._current_col)]
+        return []
+
+    def _apply_db_binding(self):
+        """应用数据库配置到当前选区；多格修改作为一个撤销批次。"""
+        if self._suppress_update:
+            return
+        targets = self._target_cells()
+        if not targets:
+            return
+
+        new_binding = self._collect_db_binding()
+        changes = []
+        for row, col in targets:
+            cd = self._template.get_cell_data(row, col)
+            old_dict = cd.to_dict()
+            new_cd = type(cd).from_dict(old_dict)
+            new_cd.query_binding = type(new_binding).from_dict(new_binding.to_dict())
+            new_dict = new_cd.to_dict()
+            if old_dict == new_dict:
+                continue
+            self._template.set_cell_data(row, col, new_cd)
+            changes.append(("cell_data", row, col, old_dict, new_dict))
+
+        if changes and self._undo_manager is not None:
+            self._undo_manager.record_batch(changes)
+        self._update_sql_preview()
+        if changes:
+            self.database_binding_changed.emit()
+
     def _update_sql_preview(self):
         """SQL 预览使用模板阶段的真实时间占位符，而不是假日期。"""
         qb = self._collect_db_binding()
@@ -157,7 +195,6 @@ class DatabaseBindingPanel(StylePanel):
             self._lbl_sql_validate.setStyleSheet("color:#188038;")
 
     def _generate_manual_sql(self):
-        """把条件构建 SQL（含时间占位符）同步到手动 SQL。"""
         qb = self._collect_db_binding()
         qb.sql_mode = "builder"
         sql = qb.build_sql()
