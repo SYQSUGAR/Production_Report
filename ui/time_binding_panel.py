@@ -1,5 +1,7 @@
 """模板编辑页的单元格时间绑定面板。"""
 
+from copy import deepcopy
+
 from PyQt6.QtCore import QDateTime, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QGroupBox, QFormLayout, QCheckBox, QComboBox,
@@ -20,7 +22,11 @@ _LABEL_TO_RANGE = {v: k for k, v in _RANGE_LABELS.items()}
 
 
 class TimeBindingPanel(QWidget):
-    """为模板当前单元格/选区配置时间规则。"""
+    """为模板当前单元格/选区配置时间规则。
+
+    多选时采用与样式、数据库一致的增量修改：改哪个时间属性，就只把
+    该属性应用到所有选中单元格，不覆盖其余时间设置。
+    """
 
     time_binding_changed = pyqtSignal()
 
@@ -115,8 +121,9 @@ class TimeBindingPanel(QWidget):
         self.refresh_availability()
 
     def _target_cells(self):
-        if len(self._selected_cells) > 1:
-            return self._selected_cells
+        cells = list(dict.fromkeys(self._selected_cells or []))
+        if cells:
+            return cells
         if self._row >= 0 and self._col >= 0:
             return [(self._row, self._col)]
         return []
@@ -129,7 +136,6 @@ class TimeBindingPanel(QWidget):
             self._status.show()
             return
 
-        # 多选时只有全部目标都启用了数据库绑定，才允许批量配置时间。
         all_enabled = True
         for row, col in targets:
             qb = self._editor._template.get_cell_data(row, col).query_binding
@@ -138,7 +144,7 @@ class TimeBindingPanel(QWidget):
                 break
         if not all_enabled:
             self._config_group.hide()
-            self._status.setText("未启用数据库绑定")
+            self._status.setText("所选单元格中存在未启用数据库绑定的单元格")
             self._status.show()
             return
 
@@ -197,6 +203,32 @@ class TimeBindingPanel(QWidget):
         self._fixed_start.setEnabled(fixed)
         self._fixed_end.setEnabled(fixed)
 
+    def _build_patch_from_sender(self):
+        sender = self.sender()
+        if sender is self._enabled:
+            return {"enabled": self._enabled.isChecked()}
+        if sender is self._time_field:
+            return {"time_field": self._time_field.text().strip()}
+        if sender is self._range_type:
+            return {
+                "range_type": _LABEL_TO_RANGE.get(
+                    self._range_type.currentText(), TimeRangeType.DAY
+                )
+            }
+        if sender is self._mode:
+            return {
+                "mode": TimeMode.CURRENT if self._mode.currentIndex() == 1 else TimeMode.SELECTED
+            }
+        if sender is self._fixed_start:
+            return {
+                "fixed_start": self._fixed_start.dateTime().toPyDateTime().isoformat(sep=" ")
+            }
+        if sender is self._fixed_end:
+            return {
+                "fixed_end": self._fixed_end.dateTime().toPyDateTime().isoformat(sep=" ")
+            }
+        return {}
+
     def _changed(self, *_args):
         if self._loading:
             return
@@ -211,23 +243,19 @@ class TimeBindingPanel(QWidget):
                 return
 
         self._update_enabled_state()
-        kind = _LABEL_TO_RANGE.get(self._range_type.currentText(), TimeRangeType.DAY)
-        mode = TimeMode.CURRENT if self._mode.currentIndex() == 1 else TimeMode.SELECTED
-        new_binding = TimeBinding(
-            enabled=self._enabled.isChecked(),
-            time_field=self._time_field.text().strip(),
-            range_type=kind,
-            mode=mode,
-            fixed_start=self._fixed_start.dateTime().toPyDateTime().isoformat(sep=" "),
-            fixed_end=self._fixed_end.dateTime().toPyDateTime().isoformat(sep=" "),
-        )
+        patch = self._build_patch_from_sender()
+        if not patch:
+            return
 
         changes = []
         for row, col in targets:
             cd = self._editor._template.get_cell_data(row, col)
             old_dict = cd.to_dict()
             new_cd = type(cd).from_dict(old_dict)
-            new_cd.query_binding.time_binding = TimeBinding.from_dict(new_binding.to_dict())
+            tb = new_cd.query_binding.time_binding or TimeBinding()
+            for key, value in patch.items():
+                setattr(tb, key, deepcopy(value))
+            new_cd.query_binding.time_binding = tb
             new_dict = new_cd.to_dict()
             if old_dict == new_dict:
                 continue
