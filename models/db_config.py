@@ -5,31 +5,24 @@ from enum import Enum
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .time_binding import TimeBinding
+from .time_binding import TimeBinding, TimeRangeType
 
 
 class QueryType(Enum):
-    SINGLE = "single"      # 单值查询
-    AGGREGATE = "aggregate"  # 聚合查询（SUM/COUNT/AVG/MAX/MIN）
+    SINGLE = "single"
+    AGGREGATE = "aggregate"
 
 
-# 运算符映射：SQL 运算符 -> 中文显示
 SQL_OPERATOR_LABELS = {
-    "=": "等于",
-    ">": "大于",
-    "<": "小于",
-    "<=": "不大于",
-    ">=": "不小于",
-    "LIKE": "包含",
-    "NOT LIKE": "不包含",
+    "=": "等于", ">": "大于", "<": "小于", "<=": "不大于", ">=": "不小于",
+    "LIKE": "包含", "NOT LIKE": "不包含",
 }
 SQL_OPERATORS = list(SQL_OPERATOR_LABELS.keys())
 
 
 @dataclass
 class DbConfig:
-    """数据库连接配置，预留给 MySQL / SQLServer 通用查询接口。"""
-    db_type: str = "mysql"          # "mysql" | "sqlserver"
+    db_type: str = "mysql"
     host: str = "localhost"
     port: int = 3306
     user: str = ""
@@ -39,38 +32,28 @@ class DbConfig:
 
     def to_dict(self) -> dict:
         return {
-            "db_type": self.db_type,
-            "host": self.host,
-            "port": self.port,
-            "user": self.user,
-            "password": self.password,
-            "database": self.database,
+            "db_type": self.db_type, "host": self.host, "port": self.port,
+            "user": self.user, "password": self.password, "database": self.database,
             "charset": self.charset,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "DbConfig":
         return cls(
-            db_type=data.get("db_type", "mysql"),
-            host=data.get("host", "localhost"),
-            port=data.get("port", 3306),
-            user=data.get("user", ""),
-            password=data.get("password", ""),
-            database=data.get("database", ""),
+            db_type=data.get("db_type", "mysql"), host=data.get("host", "localhost"),
+            port=data.get("port", 3306), user=data.get("user", ""),
+            password=data.get("password", ""), database=data.get("database", ""),
             charset=data.get("charset", "utf8mb4"),
         )
 
 
 @dataclass
 class QueryBinding:
-    """单元格的数据库查询绑定信息。
+    """单元格数据库查询绑定。
 
-    支持两种编写模式：
-      - builder：可视化条件构建（字段 + 运算符 + 值 + and/or 连接）
-      - manual：手动输入完整 SQL 语句
-
-    时间条件不再只依赖 ``{date}``。新增 ``time_binding`` 保存模板级时间规则，
-    运行时由报表预览把规则解析为 ``start_time`` / ``end_time`` 后传入 build_sql。
+    时间规则属于查询定义的一部分。模板阶段对于日/月/年/自定义这类动态时间，
+    SQL 使用 ``{start_time}`` / ``{end_time}`` 表示运行时参数；报表预览生成时
+    再由 ReportContext 把占位符解析成实际时间。
     """
     enabled: bool = False
     query_type: QueryType = QueryType.SINGLE
@@ -83,22 +66,16 @@ class QueryBinding:
     sync_modes: bool = False
     joins: list[dict] = field(default_factory=list)
     filters: list[dict] = field(default_factory=list)
-    date_placeholder: str = ""          # 兼容旧模板
+    date_placeholder: str = ""  # 仅兼容旧模板
     time_binding: TimeBinding = field(default_factory=TimeBinding)
 
     def to_dict(self) -> dict:
         return {
-            "enabled": self.enabled,
-            "query_type": self.query_type.value,
-            "db_config_key": self.db_config_key,
-            "table_name": self.table_name,
-            "field_name": self.field_name,
-            "aggregate_func": self.aggregate_func,
-            "sql_mode": self.sql_mode,
-            "custom_sql": self.custom_sql,
-            "sync_modes": self.sync_modes,
-            "joins": self.joins,
-            "filters": self.filters,
+            "enabled": self.enabled, "query_type": self.query_type.value,
+            "db_config_key": self.db_config_key, "table_name": self.table_name,
+            "field_name": self.field_name, "aggregate_func": self.aggregate_func,
+            "sql_mode": self.sql_mode, "custom_sql": self.custom_sql,
+            "sync_modes": self.sync_modes, "joins": self.joins, "filters": self.filters,
             "date_placeholder": self.date_placeholder,
             "time_binding": self.time_binding.to_dict(),
         }
@@ -108,22 +85,16 @@ class QueryBinding:
         return cls(
             enabled=data.get("enabled", False),
             query_type=QueryType(data.get("query_type", "single")),
-            db_config_key=data.get("db_config_key", ""),
-            table_name=data.get("table_name", ""),
-            field_name=data.get("field_name", ""),
-            aggregate_func=data.get("aggregate_func", ""),
-            sql_mode=data.get("sql_mode", "builder"),
-            custom_sql=data.get("custom_sql", ""),
-            sync_modes=data.get("sync_modes", False),
-            joins=data.get("joins", []),
-            filters=data.get("filters", []),
-            date_placeholder=data.get("date_placeholder", ""),
+            db_config_key=data.get("db_config_key", ""), table_name=data.get("table_name", ""),
+            field_name=data.get("field_name", ""), aggregate_func=data.get("aggregate_func", ""),
+            sql_mode=data.get("sql_mode", "builder"), custom_sql=data.get("custom_sql", ""),
+            sync_modes=data.get("sync_modes", False), joins=data.get("joins", []),
+            filters=data.get("filters", []), date_placeholder=data.get("date_placeholder", ""),
             time_binding=TimeBinding.from_dict(data.get("time_binding")),
         )
 
     @staticmethod
     def _format_value(op: str, val) -> str:
-        """格式化条件值：字符串加引号，数值不加；包含/不包含自动包裹 %。"""
         s = str(val).strip()
         if op in ("LIKE", "NOT LIKE"):
             if not (s.startswith("%") or s.endswith("%")):
@@ -131,6 +102,9 @@ class QueryBinding:
             return "'" + s.replace("'", "''") + "'"
         if s == "":
             return "''"
+        # SQL 参数占位符不能被当成普通字符串加引号，否则手动/预览不一致。
+        if s in ("{start_time}", "{end_time}"):
+            return s
         try:
             float(s)
             return s
@@ -145,24 +119,43 @@ class QueryBinding:
             text = str(value)
         return "'" + text.replace("'", "''") + "'"
 
-    def build_sql(self, date_value: str = "", time_range=None) -> str:
-        """生成 SQL。
+    def _time_tokens(self, time_range=None) -> tuple[str, str] | None:
+        if not self.time_binding.enabled:
+            return None
+        if time_range:
+            start, end = time_range
+            return self._format_datetime(start), self._format_datetime(end)
+        # 模板阶段动态时间没有具体值，用占位符明确表达“来自报表预览”。
+        if self.time_binding.range_type != TimeRangeType.FIXED:
+            return "{start_time}", "{end_time}"
+        try:
+            start = datetime.fromisoformat(self.time_binding.fixed_start)
+            end = datetime.fromisoformat(self.time_binding.fixed_end)
+        except (TypeError, ValueError):
+            return "{start_time}", "{end_time}"
+        return self._format_datetime(start), self._format_datetime(end)
 
-        ``time_range`` 为 ``(start_datetime, end_datetime)``。builder 模式会依据
-        ``time_binding.time_field`` 自动追加半开区间条件；manual 模式只替换
-        ``{start_time}`` / ``{end_time}`` 占位符，避免擅自改写复杂手写 SQL。
+    def build_sql(self, date_value: str = "", time_range=None) -> str:
+        """生成模板 SQL 或运行时 SQL。
+
+        - builder：时间绑定启用后自动把时间字段条件纳入 SQL；模板预览使用
+          ``{start_time}`` / ``{end_time}``，运行时传入 time_range 后换成实际时间。
+        - manual：用户 SQL 与同一套时间绑定共用这两个占位符，运行时仅替换参数。
         """
         if not self.enabled:
             return ""
+
+        time_tokens = self._time_tokens(time_range)
 
         if self.sql_mode == "manual":
             sql = self.custom_sql.strip()
             if date_value:
                 sql = sql.replace("{date}", date_value)
-            if time_range:
-                start, end = time_range
-                sql = sql.replace("{start_time}", self._format_datetime(start))
-                sql = sql.replace("{end_time}", self._format_datetime(end))
+            if time_tokens:
+                start_token, end_token = time_tokens
+                if time_range or self.time_binding.range_type == TimeRangeType.FIXED:
+                    sql = sql.replace("{start_time}", start_token)
+                    sql = sql.replace("{end_time}", end_token)
             return sql
 
         if not self.table_name or not self.field_name:
@@ -186,41 +179,50 @@ class QueryBinding:
                 continue
             if isinstance(val, str) and "{date}" in val and date_value:
                 val = val.replace("{date}", date_value)
-            cond = f"{field_name} {op} {self._format_value(op, val)}"
-            connector = f.get("connector", "AND").upper()
-            conditions.append((connector, cond))
+            conditions.append((f.get("connector", "AND").upper(),
+                               f"{field_name} {op} {self._format_value(op, val)}"))
 
-        if time_range and self.time_binding.enabled and self.time_binding.time_field.strip():
-            start, end = time_range
+        if time_tokens and self.time_binding.time_field.strip():
+            start_token, end_token = time_tokens
             tf = self.time_binding.time_field.strip()
-            conditions.append(("AND", f"{tf} >= {self._format_datetime(start)}"))
-            conditions.append(("AND", f"{tf} < {self._format_datetime(end)}"))
+            conditions.append(("AND", f"{tf} >= {start_token}"))
+            conditions.append(("AND", f"{tf} < {end_token}"))
 
         if conditions:
             rendered = []
             for index, (connector, cond) in enumerate(conditions):
-                rendered.append(("WHERE" if index == 0 else (connector if connector in ("AND", "OR") else "AND")) + " " + cond)
+                prefix = "WHERE" if index == 0 else (connector if connector in ("AND", "OR") else "AND")
+                rendered.append(f"{prefix} {cond}")
             sql += " " + " ".join(rendered)
         return sql
 
+    def validate_time_sql(self) -> str:
+        """检查手动 SQL 是否正确承接已启用的动态时间绑定。"""
+        tb = self.time_binding
+        if not tb.enabled:
+            return ""
+        if not tb.time_field.strip():
+            return "时间绑定已启用，但未设置时间字段"
+        if self.sql_mode != "manual":
+            return ""
+        if tb.range_type != TimeRangeType.FIXED:
+            sql = self.custom_sql or ""
+            if "{start_time}" not in sql or "{end_time}" not in sql:
+                return "手动 SQL 启用了动态时间绑定，必须同时包含 {start_time} 和 {end_time}"
+        return ""
+
 
 def _has_unsupported_clause(sql: str) -> bool:
-    """检测条件构建器无法无损表达的子句（JOIN/去重/分组/排序/限制等）。"""
-    return bool(re.search(
-        r"\b(JOIN|DISTINCT|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT)\b",
-        sql, re.I,
-    ))
+    return bool(re.search(r"\b(JOIN|DISTINCT|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT)\b", sql, re.I))
 
 
 def parse_condition(cond: str) -> dict | None:
-    """解析单个条件 `field op value`。"""
     cond = cond.strip()
     for op in ("NOT LIKE", "LIKE", "<=", ">=", "=", ">", "<"):
         m = re.match(rf"^(.+?)\s+{re.escape(op)}\s+(.+)$", cond, re.IGNORECASE)
         if m:
             field_name = m.group(1).strip()
-            value = m.group(2).strip()
-            value = value.strip("'\"")
+            value = m.group(2).strip().strip("'\"")
             if op in ("LIKE", "NOT LIKE"):
                 value = value.strip("%")
             return {"field": field_name, "op": op, "value": value}
@@ -228,12 +230,10 @@ def parse_condition(cond: str) -> dict | None:
 
 
 def parse_sql_to_binding(sql: str) -> dict:
-    """把简单 SELECT ... FROM ... WHERE ... 语句解析为绑定配置。"""
     result = {"field": "", "table": "", "aggregate": "", "filters": [], "safe": False}
     sql = (sql or "").strip().rstrip(";").strip()
     if not sql:
         return result
-
     m = re.match(r"SELECT\s+(.+?)\s+FROM\s+(\S+)", sql, re.IGNORECASE)
     if not m:
         return result
@@ -241,21 +241,17 @@ def parse_sql_to_binding(sql: str) -> dict:
         return result
     field_expr = m.group(1).strip()
     result["table"] = m.group(2)
-
     agg_m = re.match(r"(\w+)\((\w+)\)", field_expr)
     if agg_m:
         result["aggregate"] = agg_m.group(1).upper()
         result["field"] = agg_m.group(2)
     else:
         result["field"] = field_expr
-
     where_m = re.search(r"\bWHERE\b(.+?)(?=\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|$)", sql, re.I | re.S)
     if not where_m:
         result["safe"] = not _has_unsupported_clause(sql)
         return result
-    where_clause = where_m.group(1).strip()
-
-    tokens = re.split(r"\s+(AND|OR)\s+", where_clause, flags=re.IGNORECASE)
+    tokens = re.split(r"\s+(AND|OR)\s+", where_m.group(1).strip(), flags=re.IGNORECASE)
     filters = []
     connector = "where"
     for tok in tokens:
