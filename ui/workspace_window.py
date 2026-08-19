@@ -1,7 +1,10 @@
 """应用工作区：模板编辑 + 报表预览双页面。"""
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QSplitter, QTabWidget
+from PyQt6.QtWidgets import (
+    QMainWindow, QWidget, QHBoxLayout, QSplitter, QTabWidget,
+    QGroupBox, QPushButton,
+)
 
 from ui.main_window import MainWindow
 from ui.report_preview_page import ReportPreviewPage
@@ -17,6 +20,8 @@ class WorkspaceWindow(QMainWindow):
         self.resize(1600, 900)
 
         self._editor = MainWindow()
+        self._hide_legacy_style_actions()
+
         self._time_panel = TimeBindingPanel(self._editor)
         self._protect_time_binding_from_db_panel_refresh()
         self._editor._preview.selection_changed.connect(self._time_panel.set_selection)
@@ -34,16 +39,41 @@ class WorkspaceWindow(QMainWindow):
 
         self._report_preview = ReportPreviewPage(self._editor)
 
+        # 数据库开关一变，时间绑定面板立刻重新判断是否允许配置；
+        # 时间规则一变，预览页立刻重新扫描哪些日/月/年/自定义输入需要解灰。
+        self._editor._style_panel._chk_db_enabled.stateChanged.connect(
+            self._time_panel.refresh_availability
+        )
+        self._editor._style_panel._chk_db_enabled.stateChanged.connect(
+            lambda *_: self._report_preview._scan_time_requirements()
+        )
+        self._time_panel.time_binding_changed.connect(
+            self._report_preview._scan_time_requirements
+        )
+
         self._tabs = QTabWidget()
         self._tabs.addTab(template_page, "模板编辑")
         self._tabs.addTab(self._report_preview, "报表预览")
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self._tabs)
 
+    def _hide_legacy_style_actions(self):
+        """移除模板左下角已不再需要的样式范围/清除操作。"""
+        panel = self._editor._style_panel
+
+        for group in panel.findChildren(QGroupBox):
+            if group.title() == "应用样式到":
+                group.hide()
+
+        for button in panel.findChildren(QPushButton):
+            if button.text() in ("清除当前范围", "清除全部", "清除"):
+                button.hide()
+
     def _protect_time_binding_from_db_panel_refresh(self):
         """兼容现有 StylePanel：重建 QueryBinding 时保留新增的 TimeBinding。
 
-        后续若把时间控件正式合并进 StylePanel，可删除这层兼容包装。
+        StylePanel 每次修改数据库查询条件都会重新收集 QueryBinding；这里保证
+        新增的时间规则不会因为编辑数据表、字段、SQL 等操作而被重置。
         """
         panel = self._editor._style_panel
         original = getattr(panel, "_collect_db_binding", None)
