@@ -2,10 +2,10 @@
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget,
-    QGroupBox,
+    QMainWindow, QWidget, QVBoxLayout, QSplitter, QTabWidget, QGroupBox,
 )
 
+from models.value_formatter import format_display_value
 from ui.main_window import MainWindow
 from ui.report_preview_page import ReportPreviewPage
 from ui.time_binding_panel import TimeBindingPanel
@@ -21,8 +21,8 @@ class WorkspaceWindow(QMainWindow):
         self.resize(1760, 920)
 
         self._editor = MainWindow()
-        # MainWindow 原来的 StylePanel 保留作为内部兼容对象，但不再占界面位置。
         self._editor._style_panel.hide()
+        self._install_template_query_formatter()
 
         self._style_panel = StyleOnlyPanel(self._editor._template)
         self._db_panel = DatabaseBindingPanel(
@@ -66,21 +66,17 @@ class WorkspaceWindow(QMainWindow):
 
         self._report_preview = ReportPreviewPage(self._editor)
 
-        # 当前单元格选择同时驱动左右两栏。
         self._editor._preview.selection_changed.connect(self._on_editor_selection)
         self._editor._preview.cells_selected.connect(self._on_editor_cells_selected)
 
-        # 外置样式栏直接修改同一 TemplateModel，并复用编辑器原撤销栈/表格刷新。
         self._style_panel.style_changed.connect(self._editor._on_style_changed)
         self._style_panel.style_transaction.connect(self._editor._undo_mgr.record_batch)
 
-        # 数据库开关决定时间绑定是否可用。
         self._db_panel._chk_db_enabled.stateChanged.connect(self._time_panel.refresh_availability)
         self._db_panel._chk_db_enabled.stateChanged.connect(
             lambda *_: self._report_preview._scan_time_requirements()
         )
 
-        # 时间规则一变，SQL 模板和预览时间输入都立即更新。
         self._time_panel.time_binding_changed.connect(self._db_panel.refresh_sql_preview)
         self._time_panel.time_binding_changed.connect(self._report_preview._scan_time_requirements)
 
@@ -89,6 +85,20 @@ class WorkspaceWindow(QMainWindow):
         self._tabs.addTab(self._report_preview, "报表预览")
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self._tabs)
+
+    def _install_template_query_formatter(self):
+        """模板编辑中的 F5/刷新查询也按单元格数字格式展示。"""
+        table = self._editor._preview
+        original_set_query_results = table.set_query_results
+
+        def formatted_set_query_results(results):
+            formatted = {}
+            for (row, col), value in (results or {}).items():
+                style = self._editor._template.get_effective_style(row, col)
+                formatted[(row, col)] = format_display_value(value, style.number_format)
+            original_set_query_results(formatted)
+
+        table.set_query_results = formatted_set_query_results
 
     def _sync_side_panel_templates(self):
         template = self._editor._template
@@ -128,7 +138,6 @@ class WorkspaceWindow(QMainWindow):
     def _on_tab_changed(self, index: int):
         self._sync_side_panel_templates()
         if index == 1:
-            # 进入预览只同步模板；点击“生成报表”时才执行数据库查询。
             self._report_preview.sync_template()
 
     def closeEvent(self, event):
