@@ -1,170 +1,96 @@
-"""报表预览页：运行时间参数 + 源模板分屏 + 预览映射编排。"""
+"""报表预览页：仅负责输入本次时间参数、生成并查看最终报表。"""
 
 from datetime import datetime
 
-from PyQt6.QtCore import QDate, QDateTime, Qt
+from PyQt6.QtCore import QDate, QDateTime, QTime
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QPushButton,
-    QDateEdit, QDateTimeEdit, QSpinBox, QSplitter, QMessageBox,
-    QAbstractItemView,
+    QDateEdit, QDateTimeEdit, QSpinBox, QMessageBox, QAbstractItemView,
 )
 
 from models.report_context import ReportContext
 from models.time_binding import TimeRangeType, TimeMode
-from models.template_model import TemplateModel, CellData
+from models.template_model import TemplateModel
+from models.value_formatter import format_display_value
 from ui.preview_table import PreviewTable
-from ui.style_panel import StylePanel
 
 
 class ReportPreviewPage(QWidget):
-    """一次具体日报的预览与编排。
-
-    预览中的位置只保存“目标单元格 -> 源模板单元格”的引用关系；
-    数据刷新时始终回到源模板的 QueryBinding 执行查询。
-    """
+    """一次具体日报的只读生成与预览页面。"""
 
     def __init__(self, editor, parent=None):
         super().__init__(parent)
         self._editor = editor
         self._source_template = editor._template
         self._display_model = TemplateModel.from_dict(self._source_template.to_dict())
-        self._mapping: dict[tuple[int, int], tuple[int, int]] = {}
-        self._source_clipboard: dict | None = None
-        self._source_query_results: dict[tuple[int, int], str] = {}
-        self._reset_identity_mapping()
         self._build_ui()
         self._scan_time_requirements()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6)
-        root.setSpacing(6)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
 
-        time_grp = QGroupBox("本次报表时间参数")
+        time_grp = QGroupBox("本次报表时间")
         tl = QHBoxLayout(time_grp)
+        tl.setContentsMargins(8, 8, 8, 8)
+        tl.setSpacing(8)
 
+        self._lbl_day = QLabel("日:")
         self._day = QDateEdit(QDate.currentDate())
         self._day.setCalendarPopup(True)
         self._day.setDisplayFormat("yyyy-MM-dd")
-        tl.addWidget(QLabel("日:")); tl.addWidget(self._day)
+        tl.addWidget(self._lbl_day); tl.addWidget(self._day)
 
+        self._lbl_month = QLabel("月:")
         self._month = QDateEdit(QDate.currentDate())
         self._month.setCalendarPopup(True)
         self._month.setDisplayFormat("yyyy-MM")
-        tl.addWidget(QLabel("月:")); tl.addWidget(self._month)
+        tl.addWidget(self._lbl_month); tl.addWidget(self._month)
 
+        self._lbl_year = QLabel("年:")
         self._year = QSpinBox()
         self._year.setRange(1900, 2999)
         self._year.setValue(QDate.currentDate().year())
-        tl.addWidget(QLabel("年:")); tl.addWidget(self._year)
+        tl.addWidget(self._lbl_year); tl.addWidget(self._year)
 
-        self._custom_start = QDateTimeEdit(QDateTime.currentDateTime())
+        self._lbl_custom = QLabel("自定义:")
+        today_start = QDateTime(QDate.currentDate(), QTime(0, 0))
+        self._custom_start = QDateTimeEdit(today_start)
         self._custom_start.setCalendarPopup(True)
         self._custom_start.setDisplayFormat("yyyy-MM-dd HH:mm")
         self._custom_end = QDateTimeEdit(QDateTime.currentDateTime())
         self._custom_end.setCalendarPopup(True)
         self._custom_end.setDisplayFormat("yyyy-MM-dd HH:mm")
-        tl.addWidget(QLabel("自定义:")); tl.addWidget(self._custom_start)
+        tl.addWidget(self._lbl_custom); tl.addWidget(self._custom_start)
         tl.addWidget(QLabel("至")); tl.addWidget(self._custom_end)
 
-        self._btn_refresh = QPushButton("刷新数据")
-        self._btn_refresh.clicked.connect(self.refresh_report)
-        tl.addWidget(self._btn_refresh)
+        tl.addStretch(1)
+        self._btn_generate = QPushButton("生成报表")
+        self._btn_generate.setMinimumHeight(34)
+        self._btn_generate.clicked.connect(self.generate_report)
+        tl.addWidget(self._btn_generate)
         root.addWidget(time_grp)
 
-        bar = QHBoxLayout()
-        self._btn_toggle_source = QPushButton("隐藏模板源视图")
-        self._btn_toggle_source.clicked.connect(self._toggle_source)
-        bar.addWidget(self._btn_toggle_source)
-        btn_copy = QPushButton("复制源区域")
-        btn_copy.clicked.connect(self._copy_source_region)
-        bar.addWidget(btn_copy)
-        btn_paste = QPushButton("粘贴映射到预览")
-        btn_paste.clicked.connect(self._paste_mapping)
-        bar.addWidget(btn_paste)
-        btn_clear = QPushButton("清除预览选中展示")
-        btn_clear.clicked.connect(self._clear_preview_selection)
-        bar.addWidget(btn_clear)
-        btn_reset = QPushButton("恢复模板原始布局")
-        btn_reset.clicked.connect(self._reset_layout)
-        bar.addWidget(btn_reset)
-        bar.addStretch(1)
-        self._lbl_status = QLabel("预览引用模板；修改预览不会修改模板查询。")
-        self._lbl_status.setStyleSheet("color:#666;")
-        bar.addWidget(self._lbl_status)
-        root.addLayout(bar)
+        self._status = QLabel("请设置需要的时间参数，然后点击“生成报表”。")
+        self._status.setStyleSheet("color:#666; padding:2px 4px;")
+        root.addWidget(self._status)
 
-        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._result_view = PreviewTable(self._display_model, is_admin=False)
+        self._result_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        root.addWidget(self._result_view, 1)
 
-        source_box = QWidget()
-        sl = QVBoxLayout(source_box)
-        sl.setContentsMargins(0, 0, 0, 0)
-        sl.addWidget(QLabel("源模板（只读，可多选并复制）"))
-        self._source_view = PreviewTable(self._source_template, is_admin=False)
-        self._source_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self._source_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        sl.addWidget(self._source_view, 1)
-        self._source_box = source_box
-        self._splitter.addWidget(source_box)
-
-        result_box = QWidget()
-        rl = QHBoxLayout(result_box)
-        rl.setContentsMargins(0, 0, 0, 0)
-        result_table_box = QWidget()
-        rtl = QVBoxLayout(result_table_box)
-        rtl.setContentsMargins(0, 0, 0, 0)
-        rtl.addWidget(QLabel("报表预览（内容为模板引用；可修改本次预览的显示文字和样式）"))
-        self._result_view = PreviewTable(self._display_model, is_admin=True)
-        rtl.addWidget(self._result_view, 1)
-        rl.addWidget(result_table_box, 1)
-
-        self._preview_style = StylePanel(self._display_model)
-        # 预览只允许改显示样式，不暴露数据库绑定页。
-        try:
-            if self._preview_style._toolbox.count() > 1:
-                self._preview_style._toolbox.removeItem(1)
-        except Exception:
-            pass
-        self._preview_style.style_changed.connect(self._result_view.refresh_all)
-        self._result_view.selection_changed.connect(self._preview_style.set_current_selection)
-        self._result_view.cells_selected.connect(self._preview_style.set_selected_cells)
-        rl.addWidget(self._preview_style)
-        self._splitter.addWidget(result_box)
-        self._splitter.setSizes([520, 900])
-        root.addWidget(self._splitter, 1)
+    def _rebuild_display_model(self):
+        self._display_model = TemplateModel.from_dict(self._source_template.to_dict())
+        self._result_view.set_template(self._display_model)
+        self._result_view.set_query_results({})
 
     def sync_template(self):
-        """模板编辑页可能加载/新建了另一个 TemplateModel，切回预览时同步。"""
-        if self._source_template is self._editor._template:
-            self._scan_time_requirements()
-            return
-        self._source_template = self._editor._template
-        self._source_view.set_template(self._source_template)
-        self._display_model = TemplateModel.from_dict(self._source_template.to_dict())
-        self._result_view.set_template(self._display_model)
-        self._preview_style._template = self._display_model
-        self._reset_identity_mapping()
+        if self._source_template is not self._editor._template:
+            self._source_template = self._editor._template
+        self._rebuild_display_model()
         self._scan_time_requirements()
-        self._lbl_status.setText("已切换到当前模板并恢复原始预览布局。")
-
-    def _reset_identity_mapping(self):
-        self._mapping = {
-            (r, c): (r, c)
-            for r in range(self._source_template.rows)
-            for c in range(self._source_template.cols)
-        }
-
-    def _reset_layout(self):
-        self._display_model = TemplateModel.from_dict(self._source_template.to_dict())
-        self._result_view.set_template(self._display_model)
-        self._preview_style._template = self._display_model
-        self._reset_identity_mapping()
-        self.refresh_report()
-
-    def _toggle_source(self):
-        visible = not self._source_box.isVisible()
-        self._source_box.setVisible(visible)
-        self._btn_toggle_source.setText("隐藏模板源视图" if visible else "显示模板源视图")
+        self._status.setText("模板已同步。请设置时间参数后点击“生成报表”。")
 
     def _scan_time_requirements(self):
         needs = {
@@ -184,11 +110,18 @@ class ReportPreviewPage(QWidget):
             elif tb.range_type == TimeRangeType.CUSTOM:
                 needs[TimeRangeType.CUSTOM] = True
 
-        self._day.setEnabled(needs[TimeRangeType.DAY])
-        self._month.setEnabled(needs[TimeRangeType.MONTH])
-        self._year.setEnabled(needs[TimeRangeType.YEAR])
-        self._custom_start.setEnabled(needs[TimeRangeType.CUSTOM])
-        self._custom_end.setEnabled(needs[TimeRangeType.CUSTOM])
+        self._set_time_enabled(self._lbl_day, self._day, needs[TimeRangeType.DAY])
+        self._set_time_enabled(self._lbl_month, self._month, needs[TimeRangeType.MONTH])
+        self._set_time_enabled(self._lbl_year, self._year, needs[TimeRangeType.YEAR])
+        custom_enabled = needs[TimeRangeType.CUSTOM]
+        self._lbl_custom.setEnabled(custom_enabled)
+        self._custom_start.setEnabled(custom_enabled)
+        self._custom_end.setEnabled(custom_enabled)
+
+    @staticmethod
+    def _set_time_enabled(label, control, enabled: bool):
+        label.setEnabled(enabled)
+        control.setEnabled(enabled)
 
     def _build_context(self) -> ReportContext:
         generated_at = datetime.now()
@@ -203,141 +136,88 @@ class ReportPreviewPage(QWidget):
             custom_end=self._custom_end.dateTime().toPyDateTime(),
         )
 
-    def _ensure_db_connection(self) -> bool:
+    def _ensure_db_connection(self, config_key: str) -> bool:
         handler = self._editor._db_handler
-        if handler.is_connected("default"):
+        if handler.is_connected(config_key):
             return True
-        config = self._source_template.db_configs.get("default")
-        if config:
-            return handler.connect(config, "default")
-        return False
+        config = self._source_template.db_configs.get(config_key)
+        if config is None and config_key == "default":
+            config = self._source_template.db_configs.get("default")
+        return bool(config and handler.connect(config, config_key))
 
-    def refresh_report(self):
-        """统一冻结本次查询时刻，回到模板查询，再将值映射到预览。"""
-        self.sync_template()
+    def generate_report(self):
+        """按模板规则 + 本次时间上下文生成最终只读报表。"""
+        if self._source_template is not self._editor._template:
+            self._source_template = self._editor._template
+
+        self._rebuild_display_model()
+        self._scan_time_requirements()
         context = self._build_context()
-        source_results: dict[tuple[int, int], str] = {}
-        query_cells = []
-        for source in sorted(set(self._mapping.values())):
-            cd = self._source_template.get_cell_data(*source)
-            qb = cd.query_binding
-            if qb and qb.enabled:
-                query_cells.append((source, qb))
 
-        connected = True
-        if query_cells:
-            connected = self._ensure_db_connection()
-        if query_cells and not connected:
-            QMessageBox.warning(self, "数据库未连接", "当前模板包含数据库查询，但尚未建立 default 数据库连接。")
+        query_count = success_count = failed_count = invalid_time_count = 0
 
-        for source, qb in query_cells:
-            time_range = context.resolve(qb.time_binding) if qb.time_binding.enabled else None
-            if qb.time_binding.enabled and time_range is None:
-                source_results[source] = "[时间参数无效]"
+        for (row, col), source_cd in sorted(self._source_template.cell_data.items()):
+            qb = source_cd.query_binding
+            if not qb or not qb.enabled:
                 continue
-            sql = qb.build_sql(time_range=time_range)
-            if not sql:
+            query_count += 1
+
+            time_sql_error = qb.validate_time_sql()
+            if time_sql_error:
+                failed_count += 1
+                self._set_result_text(row, col, f"[SQL时间绑定无效: {time_sql_error}]")
                 continue
-            value = self._editor._db_handler.execute_query(sql, qb.db_config_key or "default") if connected else None
-            source_results[source] = "" if value is None else str(value)
 
-        self._source_query_results = source_results
-        self._source_view.set_query_results(source_results)
-
-        target_results: dict[tuple[int, int], str] = {}
-        for target, source in self._mapping.items():
-            if source in source_results:
-                target_results[target] = source_results[source]
-        self._result_view.set_query_results(target_results)
-        self._lbl_status.setText(
-            f"已刷新：{context.generated_at.strftime('%Y-%m-%d %H:%M:%S')} | "
-            f"数据库单元格 {len(query_cells)} 个"
-        )
-
-    def _copy_source_region(self):
-        cells = self._source_view.get_selected_cells()
-        if not cells:
-            self._lbl_status.setText("请先在左侧源模板中选择区域。")
-            return
-        min_r = min(r for r, _ in cells); max_r = max(r for r, _ in cells)
-        min_c = min(c for _, c in cells); max_c = max(c for _, c in cells)
-        self._source_clipboard = {
-            "top": min_r, "left": min_c,
-            "height": max_r - min_r + 1,
-            "width": max_c - min_c + 1,
-            "cells": set(cells),
-            "merges": [mr for mr in self._source_template.merge_ranges
-                       if mr.top_row >= min_r and mr.bottom_row <= max_r
-                       and mr.left_col >= min_c and mr.right_col <= max_c],
-        }
-        self._lbl_status.setText(
-            f"已复制源模板区域 {self._cell_name(min_r, min_c)}:{self._cell_name(max_r, max_c)}"
-        )
-
-    def _paste_mapping(self):
-        if not self._source_clipboard:
-            self._lbl_status.setText("请先复制源模板区域。")
-            return
-        row = self._result_view.currentRow()
-        col = self._result_view.currentColumn()
-        if row < 0 or col < 0:
-            self._lbl_status.setText("请先在右侧预览中选择粘贴左上角。")
-            return
-        cb = self._source_clipboard
-        if row + cb["height"] > self._display_model.rows or col + cb["width"] > self._display_model.cols:
-            QMessageBox.warning(self, "无法粘贴", "目标区域超出当前预览表格范围。")
-            return
-
-        # 清除目标区域中原有映射和合并；源模板的完整合并块会整体平移。
-        for tr in range(row, row + cb["height"]):
-            for tc in range(col, col + cb["width"]):
-                self._mapping.pop((tr, tc), None)
-                self._display_model.remove_merge_range(tr, tc)
-
-        for sr in range(cb["top"], cb["top"] + cb["height"]):
-            for sc in range(cb["left"], cb["left"] + cb["width"]):
-                if (sr, sc) not in cb["cells"]:
+            time_range = None
+            if qb.time_binding.enabled:
+                time_range = context.resolve(qb.time_binding)
+                if time_range is None:
+                    invalid_time_count += 1
+                    self._set_result_text(row, col, "[时间参数无效]")
                     continue
-                tr = row + sr - cb["top"]
-                tc = col + sc - cb["left"]
-                self._mapping[(tr, tc)] = (sr, sc)
-                source_cd = self._source_template.get_cell_data(sr, sc)
-                target_cd = self._display_model.get_cell_data(tr, tc)
-                target_cd.static_text = source_cd.static_text
-                target_cd.query_binding = None  # 预览只保留引用，不复制查询定义
-                self._display_model.set_cell_data(tr, tc, target_cd)
-                self._display_model.set_cell_style(tr, tc, self._source_template.get_effective_style(sr, sc))
 
-        for mr in cb["merges"]:
-            dr = row - cb["top"]; dc = col - cb["left"]
-            self._display_model.add_merge_range(
-                mr.top_row + dr, mr.bottom_row + dr,
-                mr.left_col + dc, mr.right_col + dc,
-            )
+            sql = qb.build_sql(time_range=time_range)
+            if not sql or "{start_time}" in sql or "{end_time}" in sql:
+                failed_count += 1
+                self._set_result_text(row, col, "[查询配置无效]")
+                continue
+
+            config_key = qb.db_config_key or "default"
+            if not self._ensure_db_connection(config_key):
+                failed_count += 1
+                self._set_result_text(row, col, "[数据库未连接]")
+                continue
+
+            value = self._editor._db_handler.execute_query(sql, config_key)
+            if value is None:
+                failed_count += 1
+                self._set_result_text(row, col, "[查询失败]")
+            else:
+                success_count += 1
+                style = self._source_template.get_effective_style(row, col)
+                self._set_result_text(
+                    row, col, format_display_value(value, style.number_format)
+                )
+
         self._result_view.refresh_all()
-        self.refresh_report()
-        self._lbl_status.setText(
-            f"已映射到 {self._cell_name(row, col)}；数据仍来源于源模板。"
+        timestamp = context.generated_at.strftime("%Y-%m-%d %H:%M:%S")
+        if query_count == 0:
+            self._status.setText(f"报表已生成：{timestamp}（模板中没有数据库查询单元格）")
+            return
+
+        self._status.setText(
+            f"报表已生成：{timestamp} | 查询 {query_count} 个，成功 {success_count} 个，"
+            f"失败 {failed_count} 个，时间参数无效 {invalid_time_count} 个"
         )
+        if failed_count or invalid_time_count:
+            QMessageBox.warning(
+                self, "报表生成完成但存在异常",
+                f"本次共查询 {query_count} 个数据库单元格。\n"
+                f"成功：{success_count}\n失败：{failed_count}\n"
+                f"时间参数无效：{invalid_time_count}\n\n异常位置已在预览表格中标记。",
+            )
 
-    def _clear_preview_selection(self):
-        cells = self._result_view.get_selected_cells()
-        for r, c in cells:
-            self._mapping.pop((r, c), None)
-            self._display_model.remove_merge_range(r, c)
-            self._display_model.clear_cell_data(r, c)
-        self._result_view.set_query_results({
-            target: value for target, value in self._result_view._query_results.items()
-            if target in self._mapping
-        })
-        self._result_view.refresh_all()
-        self._lbl_status.setText(f"已从本次预览移除 {len(cells)} 个展示位置；源模板未修改。")
-
-    @staticmethod
-    def _cell_name(row: int, col: int) -> str:
-        name = ""
-        n = col + 1
-        while n:
-            n, rem = divmod(n - 1, 26)
-            name = chr(65 + rem) + name
-        return f"{name}{row + 1}"
+    def _set_result_text(self, row: int, col: int, value: str):
+        cd = self._display_model.get_cell_data(row, col)
+        cd.static_text = value
+        self._display_model.set_cell_data(row, col, cd)

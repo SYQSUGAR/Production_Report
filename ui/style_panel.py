@@ -530,7 +530,12 @@ class StylePanel(QScrollArea):
         """记录当前多选的单元格列表。"""
         self._selected_cells = cells
 
-    def set_current_selection(self, scope: str, row: int, col: int):
+    def _set_selection_context(self, scope: str, row: int, col: int):
+        """更新选区上下文，不触发任何样式或数据库表单加载。
+
+        工作区左右独立面板会复用这一步，然后只加载各自负责的数据，
+        避免隐藏控件也被同步并触发另一侧的状态。
+        """
         self._current_scope = {
             "cell": StyleScope.CELL,
             "row": StyleScope.ROW,
@@ -556,6 +561,9 @@ class StylePanel(QScrollArea):
                 StyleScope.DEFAULT: "全局默认",
             }
             self._lbl_scope.setText(desc_map.get(self._current_scope, "—"))
+
+    def set_current_selection(self, scope: str, row: int, col: int):
+        self._set_selection_context(scope, row, col)
 
         self._load_style_for_current_scope()
         self._load_db_binding()

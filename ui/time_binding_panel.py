@@ -1,12 +1,11 @@
 """模板编辑页的单元格时间绑定面板。"""
 
-from PyQt6.QtCore import QDateTime, Qt
+from PyQt6.QtCore import QDateTime, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QGroupBox, QFormLayout, QCheckBox, QComboBox,
     QLineEdit, QDateTimeEdit, QLabel,
 )
 
-from models.db_config import QueryBinding
 from models.time_binding import TimeBinding, TimeRangeType, TimeMode
 
 
@@ -21,7 +20,13 @@ _LABEL_TO_RANGE = {v: k for k, v in _RANGE_LABELS.items()}
 
 
 class TimeBindingPanel(QWidget):
-    """为模板当前单元格配置“时间规则”，不指定普通动态日期。"""
+    """为模板当前单元格配置时间规则。
+
+    时间绑定是数据库查询的附属配置：只有当前单元格已经启用数据库绑定时，
+    才允许配置时间规则；否则仅显示提示，不会偷偷创建 QueryBinding。
+    """
+
+    time_binding_changed = pyqtSignal()
 
     def __init__(self, editor, parent=None):
         super().__init__(parent)
@@ -38,13 +43,22 @@ class TimeBindingPanel(QWidget):
         title = QLabel("时间绑定")
         title.setStyleSheet("font-weight:bold; font-size:14px;")
         root.addWidget(title)
+
         hint = QLabel("模板只保存时间规则；具体日期由“报表预览”提供。固定范围除外。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#666;")
         root.addWidget(hint)
 
-        grp = QGroupBox("当前单元格")
-        form = QFormLayout(grp)
+        self._status = QLabel("请选择一个单元格")
+        self._status.setWordWrap(True)
+        self._status.setStyleSheet(
+            "color:#8A5A00; background:#FFF8E1; border:1px solid #F3D98B; "
+            "padding:8px; border-radius:4px;"
+        )
+        root.addWidget(self._status)
+
+        self._config_group = QGroupBox("当前单元格")
+        form = QFormLayout(self._config_group)
         self._lbl_cell = QLabel("未选择")
         form.addRow("位置:", self._lbl_cell)
 
@@ -79,19 +93,44 @@ class TimeBindingPanel(QWidget):
         self._fixed_end.dateTimeChanged.connect(self._changed)
         form.addRow("固定结束:", self._fixed_end)
 
-        root.addWidget(grp)
+        root.addWidget(self._config_group)
         root.addStretch(1)
-        self._update_enabled_state()
+        self._config_group.hide()
 
+    # ==================================================================
+    # 当前单元格 / 数据库绑定状态
+    # ==================================================================
     def set_selection(self, row: int, col: int, _scope: str = "cell"):
         self._row, self._col = row, col
         if row < 0 or col < 0:
             self._lbl_cell.setText("未选择")
-            self.setEnabled(False)
+            self._config_group.hide()
+            self._status.setText("请选择一个单元格")
+            self._status.show()
             return
-        self.setEnabled(True)
+
         self._lbl_cell.setText(f"{self._column_name(col)}{row + 1}")
         self._load_current()
+        self.refresh_availability()
+
+    def refresh_availability(self):
+        """数据库开关变化后立即刷新右侧时间绑定面板。"""
+        if self._row < 0 or self._col < 0:
+            self._config_group.hide()
+            self._status.setText("请选择一个单元格")
+            self._status.show()
+            return
+
+        qb = self._current_query()
+        if qb is None or not qb.enabled:
+            self._config_group.hide()
+            self._status.setText("未启用数据库绑定")
+            self._status.show()
+            return
+
+        self._status.hide()
+        self._config_group.show()
+        self._update_enabled_state()
 
     @staticmethod
     def _column_name(col: int) -> str:
@@ -102,7 +141,7 @@ class TimeBindingPanel(QWidget):
             name = chr(65 + rem) + name
         return name
 
-    def _current_query(self) -> QueryBinding | None:
+    def _current_query(self):
         if self._row < 0 or self._col < 0:
             return None
         cd = self._editor._template.get_cell_data(self._row, self._col)
@@ -129,6 +168,9 @@ class TimeBindingPanel(QWidget):
             self._loading = False
         self._update_enabled_state()
 
+    # ==================================================================
+    # 时间配置
+    # ==================================================================
     def _range_changed(self, _text: str):
         self._update_enabled_state()
         self._changed()
@@ -138,7 +180,9 @@ class TimeBindingPanel(QWidget):
         kind = _LABEL_TO_RANGE.get(self._range_type.currentText(), TimeRangeType.DAY)
         self._time_field.setEnabled(enabled)
         self._range_type.setEnabled(enabled)
-        self._mode.setEnabled(enabled and kind in (TimeRangeType.DAY, TimeRangeType.MONTH, TimeRangeType.YEAR))
+        self._mode.setEnabled(
+            enabled and kind in (TimeRangeType.DAY, TimeRangeType.MONTH, TimeRangeType.YEAR)
+        )
         fixed = enabled and kind == TimeRangeType.FIXED
         self._fixed_start.setEnabled(fixed)
         self._fixed_end.setEnabled(fixed)
@@ -146,13 +190,18 @@ class TimeBindingPanel(QWidget):
     def _changed(self, *_args):
         if self._loading or self._row < 0 or self._col < 0:
             return
-        self._update_enabled_state()
+
+        # 时间绑定只能附着在“已启用”的数据库查询上。
         cd = self._editor._template.get_cell_data(self._row, self._col)
-        if cd.query_binding is None:
-            cd.query_binding = QueryBinding()
+        qb = cd.query_binding
+        if qb is None or not qb.enabled:
+            self.refresh_availability()
+            return
+
+        self._update_enabled_state()
         kind = _LABEL_TO_RANGE.get(self._range_type.currentText(), TimeRangeType.DAY)
         mode = TimeMode.CURRENT if self._mode.currentIndex() == 1 else TimeMode.SELECTED
-        cd.query_binding.time_binding = TimeBinding(
+        qb.time_binding = TimeBinding(
             enabled=self._enabled.isChecked(),
             time_field=self._time_field.text().strip(),
             range_type=kind,
@@ -160,4 +209,6 @@ class TimeBindingPanel(QWidget):
             fixed_start=self._fixed_start.dateTime().toPyDateTime().isoformat(sep=" "),
             fixed_end=self._fixed_end.dateTime().toPyDateTime().isoformat(sep=" "),
         )
+        cd.query_binding = qb
         self._editor._template.set_cell_data(self._row, self._col, cd)
+        self.time_binding_changed.emit()
