@@ -51,9 +51,8 @@ class DbConfig:
 class QueryBinding:
     """单元格数据库查询绑定。
 
-    时间规则属于查询定义的一部分。模板阶段对于日/月/年/自定义这类动态时间，
-    SQL 使用 ``{start_time}`` / ``{end_time}`` 表示运行时参数；报表预览生成时
-    再由 ReportContext 把占位符解析成实际时间。
+    模板阶段的动态时间 SQL 使用 ``{start_time}`` / ``{end_time}``；
+    报表生成时由 ReportContext 替换为本次预览选择出的实际时间。
     """
     enabled: bool = False
     query_type: QueryType = QueryType.SINGLE
@@ -66,7 +65,7 @@ class QueryBinding:
     sync_modes: bool = False
     joins: list[dict] = field(default_factory=list)
     filters: list[dict] = field(default_factory=list)
-    date_placeholder: str = ""  # 仅兼容旧模板
+    date_placeholder: str = ""
     time_binding: TimeBinding = field(default_factory=TimeBinding)
 
     def to_dict(self) -> dict:
@@ -102,7 +101,6 @@ class QueryBinding:
             return "'" + s.replace("'", "''") + "'"
         if s == "":
             return "''"
-        # SQL 参数占位符不能被当成普通字符串加引号，否则手动/预览不一致。
         if s in ("{start_time}", "{end_time}"):
             return s
         try:
@@ -125,7 +123,6 @@ class QueryBinding:
         if time_range:
             start, end = time_range
             return self._format_datetime(start), self._format_datetime(end)
-        # 模板阶段动态时间没有具体值，用占位符明确表达“来自报表预览”。
         if self.time_binding.range_type != TimeRangeType.FIXED:
             return "{start_time}", "{end_time}"
         try:
@@ -136,12 +133,6 @@ class QueryBinding:
         return self._format_datetime(start), self._format_datetime(end)
 
     def build_sql(self, date_value: str = "", time_range=None) -> str:
-        """生成模板 SQL 或运行时 SQL。
-
-        - builder：时间绑定启用后自动把时间字段条件纳入 SQL；模板预览使用
-          ``{start_time}`` / ``{end_time}``，运行时传入 time_range 后换成实际时间。
-        - manual：用户 SQL 与同一套时间绑定共用这两个占位符，运行时仅替换参数。
-        """
         if not self.enabled:
             return ""
 
@@ -179,8 +170,10 @@ class QueryBinding:
                 continue
             if isinstance(val, str) and "{date}" in val and date_value:
                 val = val.replace("{date}", date_value)
-            conditions.append((f.get("connector", "AND").upper(),
-                               f"{field_name} {op} {self._format_value(op, val)}"))
+            conditions.append((
+                f.get("connector", "AND").upper(),
+                f"{field_name} {op} {self._format_value(op, val)}",
+            ))
 
         if time_tokens and self.time_binding.time_field.strip():
             start_token, end_token = time_tokens
@@ -197,7 +190,7 @@ class QueryBinding:
         return sql
 
     def validate_time_sql(self) -> str:
-        """检查手动 SQL 是否正确承接已启用的动态时间绑定。"""
+        """确保界面上的时间绑定确实进入手动 SQL。"""
         tb = self.time_binding
         if not tb.enabled:
             return ""
@@ -205,10 +198,9 @@ class QueryBinding:
             return "时间绑定已启用，但未设置时间字段"
         if self.sql_mode != "manual":
             return ""
-        if tb.range_type != TimeRangeType.FIXED:
-            sql = self.custom_sql or ""
-            if "{start_time}" not in sql or "{end_time}" not in sql:
-                return "手动 SQL 启用了动态时间绑定，必须同时包含 {start_time} 和 {end_time}"
+        sql = self.custom_sql or ""
+        if "{start_time}" not in sql or "{end_time}" not in sql:
+            return "手动 SQL 启用了时间绑定，必须同时包含 {start_time} 和 {end_time}"
         return ""
 
 
@@ -247,7 +239,10 @@ def parse_sql_to_binding(sql: str) -> dict:
         result["field"] = agg_m.group(2)
     else:
         result["field"] = field_expr
-    where_m = re.search(r"\bWHERE\b(.+?)(?=\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|$)", sql, re.I | re.S)
+    where_m = re.search(
+        r"\bWHERE\b(.+?)(?=\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|$)",
+        sql, re.I | re.S,
+    )
     if not where_m:
         result["safe"] = not _has_unsupported_clause(sql)
         return result
@@ -258,10 +253,10 @@ def parse_sql_to_binding(sql: str) -> dict:
         if tok.upper() in ("AND", "OR"):
             connector = tok.lower()
             continue
-        cond = parse_condition(tok)
-        if cond:
-            cond["connector"] = connector
-            filters.append(cond)
+        parsed = parse_condition(tok)
+        if parsed:
+            parsed["connector"] = connector
+            filters.append(parsed)
             connector = "and"
     result["filters"] = filters
     result["safe"] = not _has_unsupported_clause(sql)
