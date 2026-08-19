@@ -2,7 +2,7 @@
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QSplitter, QTabWidget, QGroupBox,
+    QMainWindow, QWidget, QVBoxLayout, QSplitter, QTabWidget, QGroupBox, QToolBar,
 )
 
 from models.value_formatter import format_display_value
@@ -10,10 +10,11 @@ from ui.main_window import MainWindow
 from ui.report_preview_page import ReportPreviewPage
 from ui.time_binding_panel import TimeBindingPanel
 from ui.editor_side_panels import StyleOnlyPanel, DatabaseBindingPanel
+from ui.editor_history import install_editor_history
 
 
 class WorkspaceWindow(QMainWindow):
-    """模板编辑采用“样式 | 表格 | 数据库+时间”三栏结构。"""
+    """顶层操作区 + 下方“样式 | 模板表格 | 数据库+时间”三栏。"""
 
     def __init__(self):
         super().__init__()
@@ -22,14 +23,19 @@ class WorkspaceWindow(QMainWindow):
 
         self._editor = MainWindow()
         self._editor._style_panel.hide()
+        self._promote_editor_chrome()
         self._install_template_query_formatter()
 
         self._style_panel = StyleOnlyPanel(self._editor._template)
         self._db_panel = DatabaseBindingPanel(
             self._editor._template,
             metadata_provider=self._editor._get_db_metadata,
+            undo_manager=self._editor._undo_mgr,
         )
-        self._time_panel = TimeBindingPanel(self._editor)
+        self._time_panel = TimeBindingPanel(
+            self._editor,
+            undo_manager=self._editor._undo_mgr,
+        )
         self._protect_time_binding_from_db_panel_refresh(self._db_panel)
 
         template_page = QWidget()
@@ -58,7 +64,7 @@ class WorkspaceWindow(QMainWindow):
         right_layout.addWidget(db_group)
 
         main_splitter.addWidget(right)
-        main_splitter.setSizes([310, 1030, 420])
+        main_splitter.setSizes([310, 1030, 430])
         main_splitter.setStretchFactor(0, 0)
         main_splitter.setStretchFactor(1, 1)
         main_splitter.setStretchFactor(2, 0)
@@ -73,12 +79,11 @@ class WorkspaceWindow(QMainWindow):
         self._style_panel.style_transaction.connect(self._editor._undo_mgr.record_batch)
 
         self._db_panel._chk_db_enabled.stateChanged.connect(self._time_panel.refresh_availability)
-        self._db_panel._chk_db_enabled.stateChanged.connect(
-            lambda *_: self._report_preview._scan_time_requirements()
-        )
-
+        self._db_panel.database_binding_changed.connect(self._on_binding_changed)
+        self._time_panel.time_binding_changed.connect(self._on_binding_changed)
         self._time_panel.time_binding_changed.connect(self._db_panel.refresh_sql_preview)
-        self._time_panel.time_binding_changed.connect(self._report_preview._scan_time_requirements)
+
+        install_editor_history(self._editor, after_change=self._refresh_side_panels)
 
         self._tabs = QTabWidget()
         self._tabs.addTab(template_page, "模板编辑")
@@ -86,8 +91,26 @@ class WorkspaceWindow(QMainWindow):
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self._tabs)
 
+    def _promote_editor_chrome(self):
+        """把文件菜单和撤销/复制工具栏提升到整个工作区顶部。
+
+        这样左样式栏、中间表格、右数据库栏都从同一条全局工具栏下方开始。
+        """
+        menu = self._editor.menuBar()
+        self._editor.setMenuBar(None)
+        self.setMenuBar(menu)
+
+        for toolbar in list(self._editor.findChildren(QToolBar)):
+            if toolbar.parent() is self._editor:
+                self._editor.removeToolBar(toolbar)
+                self.addToolBar(toolbar)
+
+        # 状态栏也统一放到整个工作区底部，避免中间编辑器单独占一条。
+        status = self._editor.statusBar()
+        self._editor.setStatusBar(None)
+        self.setStatusBar(status)
+
     def _install_template_query_formatter(self):
-        """模板编辑中的 F5/刷新查询也按单元格数字格式展示。"""
         table = self._editor._preview
         original_set_query_results = table.set_query_results
 
@@ -105,10 +128,28 @@ class WorkspaceWindow(QMainWindow):
         self._style_panel._template = template
         self._db_panel.refresh_template(template)
 
+    def _refresh_side_panels(self):
+        """撤销/恢复/粘贴等操作后，从模板真值重新加载左右属性栏。"""
+        self._sync_side_panel_templates()
+        scope, row, col = self._editor._preview.get_current_scope_info()
+        cells = self._editor._preview.get_selected_cells()
+        self._style_panel.set_selected_cells(cells)
+        self._db_panel.set_selected_cells(cells)
+        self._time_panel.set_selected_cells(cells)
+        self._style_panel.set_current_selection(scope, row, col)
+        self._db_panel.set_current_selection(scope, row, col)
+        self._time_panel.set_selection(row, col, scope)
+        self._report_preview._scan_time_requirements()
+
+    def _on_binding_changed(self, *_args):
+        self._time_panel.refresh_availability()
+        self._report_preview._scan_time_requirements()
+
     def _on_editor_cells_selected(self, cells: list):
         self._sync_side_panel_templates()
         self._style_panel.set_selected_cells(cells)
         self._db_panel.set_selected_cells(cells)
+        self._time_panel.set_selected_cells(cells)
 
     def _on_editor_selection(self, row: int, col: int, scope: str):
         self._sync_side_panel_templates()
