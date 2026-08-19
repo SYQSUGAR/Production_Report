@@ -3,24 +3,17 @@
 from types import MethodType
 
 from PyQt6.QtGui import QAction
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QMessageBox
 
 from models.template_model import CellData
 
 
 def install_editor_history(editor, after_change=None):
-    """给现有 MainWindow 增强完整单元格历史与剪贴板能力。
-
-    现有 MainWindow 已经支持文字、样式、合并和结构撤销。本模块在不破坏
-    现有逻辑的前提下补充：
-      - CellData（静态文字 + 数据库绑定 + 时间绑定 + 备注）整体撤销/恢复；
-      - 标准复制粘贴携带完整 CellData；
-      - 多单元格粘贴仍作为一个 undo batch；
-      - 撤销/恢复/粘贴后通知外部属性栏刷新。
-    """
+    """给现有 MainWindow 增强完整模板历史与剪贴板能力。"""
     if getattr(editor, "_complete_history_installed", False):
         return
     editor._complete_history_installed = True
+    editor._dimension_history_guard = False
 
     original_apply = editor._apply_undo_change
 
@@ -36,12 +29,60 @@ def install_editor_history(editor, after_change=None):
                     self._formula_bar._current_col == col):
                 self._formula_bar.set_current_cell(row, col, cd.static_text or "")
             return
+        if kind == "row_height":
+            _, row, old_value, new_value = change
+            value = new_value if use_new else old_value
+            self._dimension_history_guard = True
+            try:
+                if value is None:
+                    self._template.row_heights.pop(row, None)
+                    value = self._preview.verticalHeader().defaultSectionSize()
+                else:
+                    self._template.row_heights[row] = value
+                self._preview.setRowHeight(row, value)
+            finally:
+                self._dimension_history_guard = False
+            return
+        if kind == "col_width":
+            _, col, old_value, new_value = change
+            value = new_value if use_new else old_value
+            self._dimension_history_guard = True
+            try:
+                if value is None:
+                    self._template.col_widths.pop(col, None)
+                    value = self._preview.horizontalHeader().defaultSectionSize()
+                else:
+                    self._template.col_widths[col] = value
+                self._preview.setColumnWidth(col, value)
+            finally:
+                self._dimension_history_guard = False
+            return
         original_apply(change, use_new)
 
     editor._apply_undo_change = MethodType(apply_undo_change, editor)
 
     # ------------------------------------------------------------------
-    # 复制：在原“文字 + 样式”剪贴板基础上追加完整 CellData。
+    # 行高 / 列宽：拖动表头尺寸也属于模板编辑，并可撤销恢复。
+    # ------------------------------------------------------------------
+    def on_row_resized(row: int, old_size: int, new_size: int):
+        if editor._dimension_history_guard or old_size == new_size:
+            return
+        old_model = editor._template.row_heights.get(row)
+        editor._template.row_heights[row] = new_size
+        editor._undo_mgr.record_batch([("row_height", row, old_model, new_size)])
+
+    def on_col_resized(col: int, old_size: int, new_size: int):
+        if editor._dimension_history_guard or old_size == new_size:
+            return
+        old_model = editor._template.col_widths.get(col)
+        editor._template.col_widths[col] = new_size
+        editor._undo_mgr.record_batch([("col_width", col, old_model, new_size)])
+
+    editor._preview.verticalHeader().sectionResized.connect(on_row_resized)
+    editor._preview.horizontalHeader().sectionResized.connect(on_col_resized)
+
+    # ------------------------------------------------------------------
+    # 复制：标准复制携带完整 CellData（文字、数据库、时间、备注）和样式。
     # ------------------------------------------------------------------
     def upgrade_internal_clipboard(*_args):
         clipboard = editor._clipboard
@@ -61,8 +102,8 @@ def install_editor_history(editor, after_change=None):
             clipboard["cells"][(dr, dc)] = (text, style, cd.to_dict())
 
     # ------------------------------------------------------------------
-    # 粘贴：普通粘贴复制完整 CellData；仅粘贴内容仍只写静态文字；
-    # 格式粘贴仍只写样式。所有目标单元格合并为一个 undo batch。
+    # 粘贴：普通粘贴=完整单元格；仅粘贴内容/格式保持原语义。
+    # 多个目标单元格只生成一个 undo batch。
     # ------------------------------------------------------------------
     def paste_from_clipboard(self, clipboard: dict, paste_text: bool, paste_style: bool):
         mapping = self._paste_mapping(clipboard)
@@ -139,16 +180,12 @@ def install_editor_history(editor, after_change=None):
 
     editor._paste_from_clipboard = MethodType(paste_from_clipboard, editor)
 
-    # 原 QAction/PreviewTable 信号在 MainWindow 初始化时已经绑定到原 _copy，
-    # 因此在原复制动作之后追加一次“剪贴板升级”即可。
     editor._preview.copy_requested.connect(upgrade_internal_clipboard)
 
     def notify(*_args):
         if after_change:
             after_change()
 
-    # 菜单和工具栏中的 QAction 追加后处理。Qt 会按连接顺序先执行原动作，
-    # 再执行这里的升级/刷新，因此不需要拆掉 MainWindow 已有信号。
     for action in editor.findChildren(QAction):
         text = (action.text() or "").replace("&", "")
         if text == "复制" or text.startswith("复制("):
