@@ -3,6 +3,9 @@
 import re
 from enum import Enum
 from dataclasses import dataclass, field
+from datetime import datetime
+
+from .time_binding import TimeBinding
 
 
 class QueryType(Enum):
@@ -65,19 +68,23 @@ class QueryBinding:
     支持两种编写模式：
       - builder：可视化条件构建（字段 + 运算符 + 值 + and/or 连接）
       - manual：手动输入完整 SQL 语句
+
+    时间条件不再只依赖 ``{date}``。新增 ``time_binding`` 保存模板级时间规则，
+    运行时由报表预览把规则解析为 ``start_time`` / ``end_time`` 后传入 build_sql。
     """
-    enabled: bool = False               # 是否启用数据库绑定
-    query_type: QueryType = QueryType.SINGLE  # 查询类型
-    db_config_key: str = ""             # 使用的数据库配置标识
-    table_name: str = ""                # 数据表名
-    field_name: str = ""                # 查询字段名
-    aggregate_func: str = ""            # 聚合函数: SUM/COUNT/AVG/MAX/MIN
-    sql_mode: str = "builder"           # "builder" | "manual"
-    custom_sql: str = ""                # 手动 SQL（sql_mode == "manual"）
-    sync_modes: bool = False             # 切换模式时自动同步可识别内容
-    joins: list[dict] = field(default_factory=list)  # [{"type":"LEFT JOIN","table":"b x","on":"a.id=x.a_id"}]
-    filters: list[dict] = field(default_factory=list)  # 多条件 [{"connector":"where/and/or","field":"","op":"=","value":""}]
-    date_placeholder: str = ""          # 日期占位符，如 "{date}"，运行时替换为选定日期
+    enabled: bool = False
+    query_type: QueryType = QueryType.SINGLE
+    db_config_key: str = ""
+    table_name: str = ""
+    field_name: str = ""
+    aggregate_func: str = ""
+    sql_mode: str = "builder"
+    custom_sql: str = ""
+    sync_modes: bool = False
+    joins: list[dict] = field(default_factory=list)
+    filters: list[dict] = field(default_factory=list)
+    date_placeholder: str = ""          # 兼容旧模板
+    time_binding: TimeBinding = field(default_factory=TimeBinding)
 
     def to_dict(self) -> dict:
         return {
@@ -93,6 +100,7 @@ class QueryBinding:
             "joins": self.joins,
             "filters": self.filters,
             "date_placeholder": self.date_placeholder,
+            "time_binding": self.time_binding.to_dict(),
         }
 
     @classmethod
@@ -110,6 +118,7 @@ class QueryBinding:
             joins=data.get("joins", []),
             filters=data.get("filters", []),
             date_placeholder=data.get("date_placeholder", ""),
+            time_binding=TimeBinding.from_dict(data.get("time_binding")),
         )
 
     @staticmethod
@@ -119,21 +128,43 @@ class QueryBinding:
         if op in ("LIKE", "NOT LIKE"):
             if not (s.startswith("%") or s.endswith("%")):
                 s = f"%{s}%"
-            return f"'{s}'"
+            return "'" + s.replace("'", "''") + "'"
         if s == "":
             return "''"
         try:
             float(s)
             return s
         except ValueError:
-            return f"'{s}'"
+            return "'" + s.replace("'", "''") + "'"
 
-    def build_sql(self, date_value: str = "") -> str:
-        """生成 SQL。manual 模式直接返回手写语句，builder 模式按条件构建。"""
+    @staticmethod
+    def _format_datetime(value: datetime | str) -> str:
+        if isinstance(value, datetime):
+            text = value.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            text = str(value)
+        return "'" + text.replace("'", "''") + "'"
+
+    def build_sql(self, date_value: str = "", time_range=None) -> str:
+        """生成 SQL。
+
+        ``time_range`` 为 ``(start_datetime, end_datetime)``。builder 模式会依据
+        ``time_binding.time_field`` 自动追加半开区间条件；manual 模式只替换
+        ``{start_time}`` / ``{end_time}`` 占位符，避免擅自改写复杂手写 SQL。
+        """
         if not self.enabled:
             return ""
+
         if self.sql_mode == "manual":
-            return self.custom_sql.strip()
+            sql = self.custom_sql.strip()
+            if date_value:
+                sql = sql.replace("{date}", date_value)
+            if time_range:
+                start, end = time_range
+                sql = sql.replace("{start_time}", self._format_datetime(start))
+                sql = sql.replace("{end_time}", self._format_datetime(end))
+            return sql
+
         if not self.table_name or not self.field_name:
             return ""
 
@@ -146,8 +177,8 @@ class QueryBinding:
             if join.get("table") and join.get("on"):
                 sql += f" {join.get('type', 'LEFT JOIN').upper()} {join['table']} ON {join['on']}"
 
-        parts = []
-        for i, f in enumerate(self.filters):
+        conditions: list[tuple[str, str]] = []
+        for f in self.filters:
             field_name = f.get("field", "")
             op = f.get("op", "=")
             val = f.get("value", "")
@@ -156,11 +187,20 @@ class QueryBinding:
             if isinstance(val, str) and "{date}" in val and date_value:
                 val = val.replace("{date}", date_value)
             cond = f"{field_name} {op} {self._format_value(op, val)}"
-            connector = "WHERE" if i == 0 else f.get("connector", "AND").upper()
-            parts.append(f"{connector} {cond}")
+            connector = f.get("connector", "AND").upper()
+            conditions.append((connector, cond))
 
-        if parts:
-            sql += " " + " ".join(parts)
+        if time_range and self.time_binding.enabled and self.time_binding.time_field.strip():
+            start, end = time_range
+            tf = self.time_binding.time_field.strip()
+            conditions.append(("AND", f"{tf} >= {self._format_datetime(start)}"))
+            conditions.append(("AND", f"{tf} < {self._format_datetime(end)}"))
+
+        if conditions:
+            rendered = []
+            for index, (connector, cond) in enumerate(conditions):
+                rendered.append(("WHERE" if index == 0 else (connector if connector in ("AND", "OR") else "AND")) + " " + cond)
+            sql += " " + " ".join(rendered)
         return sql
 
 
@@ -173,9 +213,8 @@ def _has_unsupported_clause(sql: str) -> bool:
 
 
 def parse_condition(cond: str) -> dict | None:
-    """解析单个条件 `field op value`，返回 {"field":..., "op":..., "value":...}。"""
+    """解析单个条件 `field op value`。"""
     cond = cond.strip()
-    # 按运算符长度降序匹配，避免 ">=" 被 ">" 误匹配
     for op in ("NOT LIKE", "LIKE", "<=", ">=", "=", ">", "<"):
         m = re.match(rf"^(.+?)\s+{re.escape(op)}\s+(.+)$", cond, re.IGNORECASE)
         if m:
@@ -189,10 +228,7 @@ def parse_condition(cond: str) -> dict | None:
 
 
 def parse_sql_to_binding(sql: str) -> dict:
-    """把简单 SELECT ... FROM ... WHERE ... 语句解析为绑定配置。
-
-    返回 {"field":..., "table":..., "aggregate":..., "filters":[...]}。
-    """
+    """把简单 SELECT ... FROM ... WHERE ... 语句解析为绑定配置。"""
     result = {"field": "", "table": "", "aggregate": "", "filters": [], "safe": False}
     sql = (sql or "").strip().rstrip(";").strip()
     if not sql:
@@ -201,7 +237,6 @@ def parse_sql_to_binding(sql: str) -> dict:
     m = re.match(r"SELECT\s+(.+?)\s+FROM\s+(\S+)", sql, re.IGNORECASE)
     if not m:
         return result
-    # 可视化构建器不能无损表达子查询、UNION、CTE；拒绝回填以保护原 SQL。
     if re.search(r"\b(UNION|WITH|INTERSECT|EXCEPT)\b|\(\s*SELECT\b", sql, re.I):
         return result
     field_expr = m.group(1).strip()
