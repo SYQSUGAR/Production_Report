@@ -6,6 +6,7 @@ from ui.style_panel import StylePanel
 from models.template_model import CellStyle
 
 
+<<<<<<< HEAD
 def _hide_removed_toolbox_page(toolbox, index: int):
     """Remove a toolbox page and explicitly hide the retained widget.
 
@@ -19,6 +20,8 @@ def _hide_removed_toolbox_page(toolbox, index: int):
     page.hide()
 
 
+=======
+>>>>>>> fb7ea564cf4c851b81e6014b781451d387cb7801
 class StyleOnlyPanel(StylePanel):
     """左侧：仅保留字体、颜色、边框、对齐和数字格式。"""
 
@@ -28,7 +31,11 @@ class StyleOnlyPanel(StylePanel):
         self.setMaximumWidth(360)
 
         if self._toolbox.count() > 1:
+<<<<<<< HEAD
             _hide_removed_toolbox_page(self._toolbox, 1)
+=======
+            self._toolbox.removeItem(1)
+>>>>>>> fb7ea564cf4c851b81e6014b781451d387cb7801
         self._hide_legacy_actions()
 
         # 数字格式与数据库查询彻底解耦。
@@ -37,11 +44,14 @@ class StyleOnlyPanel(StylePanel):
         self._nf_sub_widget.setEnabled(True)
         self._nf_grp.setToolTip("")
 
+<<<<<<< HEAD
     def set_current_selection(self, scope: str, row: int, col: int):
         """左侧只同步样式，不读取隐藏的数据库表单。"""
         self._set_selection_context(scope, row, col)
         self._load_style_for_current_scope()
 
+=======
+>>>>>>> fb7ea564cf4c851b81e6014b781451d387cb7801
     def _hide_legacy_actions(self):
         for group in self.findChildren(QGroupBox):
             if group.title() == "应用样式到":
@@ -90,6 +100,7 @@ class DatabaseBindingPanel(StylePanel):
         self.setMaximumWidth(520)
 
         if self._toolbox.count() > 0:
+<<<<<<< HEAD
             _hide_removed_toolbox_page(self._toolbox, 0)
         self._hide_legacy_actions()
 
@@ -98,6 +109,11 @@ class DatabaseBindingPanel(StylePanel):
         self._set_selection_context(scope, row, col)
         self._load_db_binding()
 
+=======
+            self._toolbox.removeItem(0)
+        self._hide_legacy_actions()
+
+>>>>>>> fb7ea564cf4c851b81e6014b781451d387cb7801
     def _hide_legacy_actions(self):
         for group in self.findChildren(QGroupBox):
             if group.title() == "应用样式到":
