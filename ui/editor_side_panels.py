@@ -1,5 +1,7 @@
 """模板编辑页左右独立属性栏。"""
 
+from PyQt6.QtWidgets import QGroupBox, QPushButton
+
 from ui.style_panel import StylePanel
 from models.template_model import CellStyle
 
@@ -12,23 +14,23 @@ class StyleOnlyPanel(StylePanel):
         self.setMinimumWidth(285)
         self.setMaximumWidth(360)
 
-        # StylePanel 的第 2 页是数据库绑定；左侧彻底移除。
         if self._toolbox.count() > 1:
             self._toolbox.removeItem(1)
+        self._hide_legacy_actions()
 
-        # 旧的“应用样式到”和清除按钮不再显示。
-        for group in self.findChildren(__import__('PyQt6.QtWidgets', fromlist=['QGroupBox']).QGroupBox):
-            if group.title() == "应用样式到":
-                group.hide()
-        for button in self.findChildren(__import__('PyQt6.QtWidgets', fromlist=['QPushButton']).QPushButton):
-            if button.text() in ("清除当前范围", "清除全部", "清除"):
-                button.hide()
-
-        # 数字格式与数据库查询完全解耦。
+        # 数字格式与数据库查询彻底解耦。
         self._lbl_nf_db_lock.hide()
         self._cmb_number_cat.setEnabled(True)
         self._nf_sub_widget.setEnabled(True)
         self._nf_grp.setToolTip("")
+
+    def _hide_legacy_actions(self):
+        for group in self.findChildren(QGroupBox):
+            if group.title() == "应用样式到":
+                group.hide()
+        for button in self.findChildren(QPushButton):
+            if button.text() in ("清除当前范围", "清除全部", "清除"):
+                button.hide()
 
     def _on_number_cat_changed(self, idx: int):
         categories = ["常规", "数值", "日期", "百分比", "文本", "自定义"]
@@ -54,7 +56,6 @@ class StyleOnlyPanel(StylePanel):
             self._apply_style(CellStyle(number_format=self._collect_number_format()))
 
     def _update_db_ui_state(self):
-        # 隐藏的数据库页仍会在基类内部调用此函数，但绝不能锁住左侧数字格式。
         super()._update_db_ui_state()
         self._cmb_number_cat.setEnabled(True)
         self._nf_sub_widget.setEnabled(True)
@@ -67,19 +68,63 @@ class DatabaseBindingPanel(StylePanel):
 
     def __init__(self, template, parent=None, metadata_provider=None):
         super().__init__(template, parent=parent, metadata_provider=metadata_provider)
-        self.setMinimumWidth(360)
-        self.setMaximumWidth(500)
+        self.setMinimumWidth(380)
+        self.setMaximumWidth(520)
 
-        # 第 1 页是样式；右侧彻底移除，只显示数据库绑定。
         if self._toolbox.count() > 0:
             self._toolbox.removeItem(0)
+        self._hide_legacy_actions()
 
-        for group in self.findChildren(__import__('PyQt6.QtWidgets', fromlist=['QGroupBox']).QGroupBox):
+    def _hide_legacy_actions(self):
+        for group in self.findChildren(QGroupBox):
             if group.title() == "应用样式到":
                 group.hide()
-        for button in self.findChildren(__import__('PyQt6.QtWidgets', fromlist=['QPushButton']).QPushButton):
+        for button in self.findChildren(QPushButton):
             if button.text() in ("清除当前范围", "清除全部", "清除"):
                 button.hide()
 
     def refresh_template(self, template):
         self._template = template
+
+    def refresh_sql_preview(self):
+        self._update_sql_preview()
+
+    def _update_sql_preview(self):
+        """SQL 预览使用模板阶段的真实时间占位符，而不是假日期。"""
+        qb = self._collect_db_binding()
+        if not qb.enabled:
+            self._lbl_sql_preview.setText("（未启用数据库绑定）")
+            self._lbl_sql_validate.setText("")
+            return
+
+        sql = qb.build_sql()
+        if not sql:
+            self._lbl_sql_preview.setText("（请填写字段/数据表或 SQL 语句）")
+            self._lbl_sql_validate.setText("")
+            return
+
+        self._lbl_sql_preview.setText(sql)
+        err = qb.validate_time_sql() or self._validate_sql(sql)
+        if err:
+            self._lbl_sql_validate.setText(f"⚠ {err}")
+            self._lbl_sql_validate.setStyleSheet("color:#D93025;")
+        else:
+            if qb.time_binding.enabled and "{start_time}" in sql:
+                self._lbl_sql_validate.setText(
+                    "✓ SQL 模板有效；{start_time}/{end_time} 将在生成报表时由预览时间替换"
+                )
+            else:
+                self._lbl_sql_validate.setText("✓ SQL 语法正确")
+            self._lbl_sql_validate.setStyleSheet("color:#188038;")
+
+    def _generate_manual_sql(self):
+        """把条件构建 SQL（含时间占位符）同步到手动 SQL。"""
+        qb = self._collect_db_binding()
+        qb.sql_mode = "builder"
+        sql = qb.build_sql()
+        if sql:
+            self._txt_custom_sql.blockSignals(True)
+            self._txt_custom_sql.setPlainText(sql)
+            self._txt_custom_sql.blockSignals(False)
+            self._apply_db_binding()
+            self._update_sql_preview()
