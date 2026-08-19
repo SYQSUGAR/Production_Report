@@ -20,19 +20,17 @@ _LABEL_TO_RANGE = {v: k for k, v in _RANGE_LABELS.items()}
 
 
 class TimeBindingPanel(QWidget):
-    """为模板当前单元格配置时间规则。
-
-    时间绑定是数据库查询的附属配置：只有当前单元格已经启用数据库绑定时，
-    才允许配置时间规则；否则仅显示提示，不会偷偷创建 QueryBinding。
-    """
+    """为模板当前单元格/选区配置时间规则。"""
 
     time_binding_changed = pyqtSignal()
 
-    def __init__(self, editor, parent=None):
+    def __init__(self, editor, parent=None, undo_manager=None):
         super().__init__(parent)
         self._editor = editor
+        self._undo_manager = undo_manager
         self._row = -1
         self._col = -1
+        self._selected_cells: list[tuple[int, int]] = []
         self._loading = False
         self._build_ui()
 
@@ -97,9 +95,13 @@ class TimeBindingPanel(QWidget):
         root.addStretch(1)
         self._config_group.hide()
 
-    # ==================================================================
-    # 当前单元格 / 数据库绑定状态
-    # ==================================================================
+    def set_selected_cells(self, cells: list):
+        self._selected_cells = list(dict.fromkeys(cells or []))
+        if len(self._selected_cells) > 1:
+            self._config_group.setTitle(f"当前选区（{len(self._selected_cells)} 个单元格）")
+        else:
+            self._config_group.setTitle("当前单元格")
+
     def set_selection(self, row: int, col: int, _scope: str = "cell"):
         self._row, self._col = row, col
         if row < 0 or col < 0:
@@ -108,21 +110,33 @@ class TimeBindingPanel(QWidget):
             self._status.setText("请选择一个单元格")
             self._status.show()
             return
-
         self._lbl_cell.setText(f"{self._column_name(col)}{row + 1}")
         self._load_current()
         self.refresh_availability()
 
+    def _target_cells(self):
+        if len(self._selected_cells) > 1:
+            return self._selected_cells
+        if self._row >= 0 and self._col >= 0:
+            return [(self._row, self._col)]
+        return []
+
     def refresh_availability(self):
-        """数据库开关变化后立即刷新右侧时间绑定面板。"""
-        if self._row < 0 or self._col < 0:
+        targets = self._target_cells()
+        if not targets:
             self._config_group.hide()
             self._status.setText("请选择一个单元格")
             self._status.show()
             return
 
-        qb = self._current_query()
-        if qb is None or not qb.enabled:
+        # 多选时只有全部目标都启用了数据库绑定，才允许批量配置时间。
+        all_enabled = True
+        for row, col in targets:
+            qb = self._editor._template.get_cell_data(row, col).query_binding
+            if qb is None or not qb.enabled:
+                all_enabled = False
+                break
+        if not all_enabled:
             self._config_group.hide()
             self._status.setText("未启用数据库绑定")
             self._status.show()
@@ -144,8 +158,7 @@ class TimeBindingPanel(QWidget):
     def _current_query(self):
         if self._row < 0 or self._col < 0:
             return None
-        cd = self._editor._template.get_cell_data(self._row, self._col)
-        return cd.query_binding
+        return self._editor._template.get_cell_data(self._row, self._col).query_binding
 
     def _load_current(self):
         qb = self._current_query()
@@ -168,9 +181,6 @@ class TimeBindingPanel(QWidget):
             self._loading = False
         self._update_enabled_state()
 
-    # ==================================================================
-    # 时间配置
-    # ==================================================================
     def _range_changed(self, _text: str):
         self._update_enabled_state()
         self._changed()
@@ -180,28 +190,30 @@ class TimeBindingPanel(QWidget):
         kind = _LABEL_TO_RANGE.get(self._range_type.currentText(), TimeRangeType.DAY)
         self._time_field.setEnabled(enabled)
         self._range_type.setEnabled(enabled)
-        self._mode.setEnabled(
-            enabled and kind in (TimeRangeType.DAY, TimeRangeType.MONTH, TimeRangeType.YEAR)
-        )
+        self._mode.setEnabled(enabled and kind in (
+            TimeRangeType.DAY, TimeRangeType.MONTH, TimeRangeType.YEAR
+        ))
         fixed = enabled and kind == TimeRangeType.FIXED
         self._fixed_start.setEnabled(fixed)
         self._fixed_end.setEnabled(fixed)
 
     def _changed(self, *_args):
-        if self._loading or self._row < 0 or self._col < 0:
+        if self._loading:
+            return
+        targets = self._target_cells()
+        if not targets:
             return
 
-        # 时间绑定只能附着在“已启用”的数据库查询上。
-        cd = self._editor._template.get_cell_data(self._row, self._col)
-        qb = cd.query_binding
-        if qb is None or not qb.enabled:
-            self.refresh_availability()
-            return
+        for row, col in targets:
+            qb = self._editor._template.get_cell_data(row, col).query_binding
+            if qb is None or not qb.enabled:
+                self.refresh_availability()
+                return
 
         self._update_enabled_state()
         kind = _LABEL_TO_RANGE.get(self._range_type.currentText(), TimeRangeType.DAY)
         mode = TimeMode.CURRENT if self._mode.currentIndex() == 1 else TimeMode.SELECTED
-        qb.time_binding = TimeBinding(
+        new_binding = TimeBinding(
             enabled=self._enabled.isChecked(),
             time_field=self._time_field.text().strip(),
             range_type=kind,
@@ -209,6 +221,20 @@ class TimeBindingPanel(QWidget):
             fixed_start=self._fixed_start.dateTime().toPyDateTime().isoformat(sep=" "),
             fixed_end=self._fixed_end.dateTime().toPyDateTime().isoformat(sep=" "),
         )
-        cd.query_binding = qb
-        self._editor._template.set_cell_data(self._row, self._col, cd)
-        self.time_binding_changed.emit()
+
+        changes = []
+        for row, col in targets:
+            cd = self._editor._template.get_cell_data(row, col)
+            old_dict = cd.to_dict()
+            new_cd = type(cd).from_dict(old_dict)
+            new_cd.query_binding.time_binding = TimeBinding.from_dict(new_binding.to_dict())
+            new_dict = new_cd.to_dict()
+            if old_dict == new_dict:
+                continue
+            self._editor._template.set_cell_data(row, col, new_cd)
+            changes.append(("cell_data", row, col, old_dict, new_dict))
+
+        if changes and self._undo_manager is not None:
+            self._undo_manager.record_batch(changes)
+        if changes:
+            self.time_binding_changed.emit()
