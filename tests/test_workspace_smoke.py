@@ -3,7 +3,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication, QToolBar
+from PyQt6.QtWidgets import QApplication
 
 from ui.workspace_window import WorkspaceWindow
 
@@ -29,21 +29,35 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertIsNotNone(self.window._time_panel)
         self.assertIsNotNone(self.window._report_preview)
 
-    def test_top_menu_and_toolbar_are_owned_by_workspace(self):
-        menu_texts = [a.text().replace("&", "") for a in self.window.menuBar().actions()]
-        self.assertIn("文件(F)", menu_texts)
-        self.assertIn("编辑(E)", menu_texts)
-        self.assertIn("数据库(D)", menu_texts)
+    def test_preview_is_first_and_default_tab(self):
+        self.assertEqual(self.window._tabs.count(), 2)
+        self.assertEqual(self.window._tabs.tabText(0), "报表预览")
+        self.assertEqual(self.window._tabs.tabText(1), "模板编辑")
+        self.assertEqual(self.window._tabs.currentIndex(), 0)
 
-        toolbar = self.window.findChild(QToolBar, "")
-        toolbars = self.window.findChildren(QToolBar)
-        workspace_bars = [tb for tb in toolbars if tb.parent() is self.window]
-        self.assertTrue(workspace_bars)
-        action_texts = [a.text() for a in workspace_bars[0].actions() if a.text()]
-        self.assertIn("撤销", action_texts)
-        self.assertIn("恢复", action_texts)
-        self.assertIn("复制", action_texts)
-        self.assertIn("粘贴", action_texts)
+    def test_edit_menu_and_toolbar_live_inside_template_page_only(self):
+        # Workspace 顶层不再承载模板编辑菜单/工具栏。
+        self.assertFalse(self.window.menuBar().isVisible())
+
+        self.assertEqual(
+            [a.text().replace("&", "") for a in self.window._template_menu_bar.actions()],
+            [a.text().replace("&", "") for a in self.window._editor.menuBar().actions()],
+        )
+        self.assertEqual(
+            [a.text() for a in self.window._template_toolbar.actions()],
+            [a.text() for tb in self.window._editor.findChildren(type(self.window._template_toolbar))
+             if tb.windowTitle() == "主工具栏" and tb is not self.window._template_toolbar
+             for a in tb.actions()],
+        )
+
+        # 默认在预览页时，模板页整体不可见，因此两排编辑操作也不可见。
+        self.assertFalse(self.window._template_menu_bar.isVisible())
+        self.assertFalse(self.window._template_toolbar.isVisible())
+
+        self.window._tabs.setCurrentIndex(1)
+        self.app.processEvents()
+        self.assertTrue(self.window._template_menu_bar.isVisible())
+        self.assertTrue(self.window._template_toolbar.isVisible())
 
     def test_side_panels_do_not_cross_construct_controls(self):
         self.assertTrue(hasattr(self.window._style_panel, "_nf_grp"))
