@@ -21,9 +21,15 @@ class WorkspaceWindow(QMainWindow):
         self.setWindowTitle("生产报表模板编辑与预览")
         self.resize(1760, 920)
 
+        # MainWindow 继续作为模板编辑核心，负责文件、编辑、数据库命令以及
+        # 公式栏/表格。WorkspaceWindow 只负责重新组织可视布局。
         self._editor = MainWindow()
         self._editor._style_panel.hide()
-        self._promote_editor_chrome()
+
+        # 不再“搬走”QMainWindow 的 menuBar/statusBar。
+        # QMainWindow 对这些对象有所有权，setMenuBar(None)/setStatusBar(None)
+        # 可能销毁底层 C++ 对象，随后继续使用会造成启动时直接闪退。
+        self._build_workspace_chrome()
         self._install_template_query_formatter()
 
         self._style_panel = StyleOnlyPanel(self._editor._template)
@@ -42,6 +48,7 @@ class WorkspaceWindow(QMainWindow):
         template_layout = QVBoxLayout(template_page)
         template_layout.setContentsMargins(0, 0, 0, 0)
 
+        # 三栏都从“菜单栏 + 主工具栏”下方开始。
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
         main_splitter.addWidget(self._style_panel)
         main_splitter.addWidget(self._editor)
@@ -91,24 +98,37 @@ class WorkspaceWindow(QMainWindow):
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self._tabs)
 
-    def _promote_editor_chrome(self):
-        """把文件菜单和撤销/复制工具栏提升到整个工作区顶部。
+    # ==================================================================
+    # 顶部两排：菜单栏 + 主工具栏
+    # ==================================================================
+    def _build_workspace_chrome(self):
+        """在 Workspace 自己的顶部重建菜单栏和工具栏。
 
-        这样左样式栏、中间表格、右数据库栏都从同一条全局工具栏下方开始。
+        这里复用 MainWindow 已创建好的 QAction，但不改变 QAction/QMenu 的
+        所有权，也不把 QMenuBar/QToolBar 本体从一个 QMainWindow 移到另一个。
+        这样既保留原来的全部命令和快捷键，又避免 Qt 所有权造成的闪退。
         """
-        menu = self._editor.menuBar()
-        self._editor.setMenuBar(None)
-        self.setMenuBar(menu)
+        source_menu = self._editor.menuBar()
+        target_menu = self.menuBar()
+        target_menu.clear()
+        for action in source_menu.actions():
+            target_menu.addAction(action)
+        # 内部菜单隐藏，不再占中间列顶部空间；动作仍由外层菜单复用。
+        source_menu.hide()
 
-        for toolbar in list(self._editor.findChildren(QToolBar)):
-            if toolbar.parent() is self._editor:
-                self._editor.removeToolBar(toolbar)
-                self.addToolBar(toolbar)
+        source_toolbar = None
+        for toolbar in self._editor.findChildren(QToolBar):
+            if toolbar.windowTitle() == "主工具栏":
+                source_toolbar = toolbar
+                break
 
-        # 状态栏也统一放到整个工作区底部，避免中间编辑器单独占一条。
-        status = self._editor.statusBar()
-        self._editor.setStatusBar(None)
-        self.setStatusBar(status)
+        self._workspace_toolbar = QToolBar("主工具栏", self)
+        self._workspace_toolbar.setMovable(False)
+        if source_toolbar is not None:
+            for action in source_toolbar.actions():
+                self._workspace_toolbar.addAction(action)
+            source_toolbar.hide()
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._workspace_toolbar)
 
     def _install_template_query_formatter(self):
         table = self._editor._preview
