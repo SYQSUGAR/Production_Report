@@ -1,8 +1,9 @@
-"""应用工作区：模板编辑 + 报表预览双页面。"""
+"""应用工作区：报表预览 + 模板编辑双页面。"""
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QSplitter, QTabWidget, QGroupBox, QToolBar,
+    QMainWindow, QWidget, QVBoxLayout, QSplitter, QTabWidget, QGroupBox,
+    QToolBar, QMenuBar,
 )
 
 from models.value_formatter import format_display_value
@@ -14,22 +15,17 @@ from ui.editor_history import install_editor_history
 
 
 class WorkspaceWindow(QMainWindow):
-    """顶层操作区 + 下方“样式 | 模板表格 | 数据库+时间”三栏。"""
+    """一级页签为“报表预览 / 模板编辑”，编辑命令只属于模板页。"""
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("生产报表模板编辑与预览")
         self.resize(1760, 920)
 
-        # MainWindow 继续作为模板编辑核心，负责文件、编辑、数据库命令以及
-        # 公式栏/表格。WorkspaceWindow 只负责重新组织可视布局。
+        # MainWindow 仍作为模板编辑核心，保留原来的文件/编辑/数据库命令、
+        # 公式栏、表格和状态逻辑；WorkspaceWindow 只重新组织页面层级。
         self._editor = MainWindow()
         self._editor._style_panel.hide()
-
-        # 不再“搬走”QMainWindow 的 menuBar/statusBar。
-        # QMainWindow 对这些对象有所有权，setMenuBar(None)/setStatusBar(None)
-        # 可能销毁底层 C++ 对象，随后继续使用会造成启动时直接闪退。
-        self._build_workspace_chrome()
         self._install_template_query_formatter()
 
         self._style_panel = StyleOnlyPanel(self._editor._template)
@@ -44,11 +40,19 @@ class WorkspaceWindow(QMainWindow):
         )
         self._protect_time_binding_from_db_panel_refresh(self._db_panel)
 
+        # --------------------------------------------------------------
+        # 模板编辑页：页签下面依次是“原菜单栏 / 原工具栏 / 三栏编辑区”。
+        # 两排操作只存在于该页，因此切到报表预览时完全不会出现。
+        # --------------------------------------------------------------
         template_page = QWidget()
         template_layout = QVBoxLayout(template_page)
         template_layout.setContentsMargins(0, 0, 0, 0)
+        template_layout.setSpacing(0)
 
-        # 三栏都从“菜单栏 + 主工具栏”下方开始。
+        self._build_template_chrome(template_page)
+        template_layout.addWidget(self._template_menu_bar)
+        template_layout.addWidget(self._template_toolbar)
+
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
         main_splitter.addWidget(self._style_panel)
         main_splitter.addWidget(self._editor)
@@ -75,8 +79,9 @@ class WorkspaceWindow(QMainWindow):
         main_splitter.setStretchFactor(0, 0)
         main_splitter.setStretchFactor(1, 1)
         main_splitter.setStretchFactor(2, 0)
-        template_layout.addWidget(main_splitter)
+        template_layout.addWidget(main_splitter, 1)
 
+        # 报表预览页不放任何模板编辑菜单/工具栏。
         self._report_preview = ReportPreviewPage(self._editor)
 
         self._editor._preview.selection_changed.connect(self._on_editor_selection)
@@ -92,28 +97,30 @@ class WorkspaceWindow(QMainWindow):
 
         install_editor_history(self._editor, after_change=self._refresh_side_panels)
 
+        # 一级页签顺序：先预览，再模板编辑。
         self._tabs = QTabWidget()
-        self._tabs.addTab(template_page, "模板编辑")
         self._tabs.addTab(self._report_preview, "报表预览")
+        self._tabs.addTab(template_page, "模板编辑")
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self._tabs)
+        self._tabs.setCurrentIndex(0)
+        self._report_preview.sync_template()
 
     # ==================================================================
-    # 顶部两排：菜单栏 + 主工具栏
+    # 模板编辑页内部两排：菜单栏 + 主工具栏
     # ==================================================================
-    def _build_workspace_chrome(self):
-        """在 Workspace 自己的顶部重建菜单栏和工具栏。
+    def _build_template_chrome(self, parent: QWidget):
+        """按 MainWindow 原始顺序复制菜单和工具栏动作到模板页内部。
 
-        这里复用 MainWindow 已创建好的 QAction，但不改变 QAction/QMenu 的
-        所有权，也不把 QMenuBar/QToolBar 本体从一个 QMainWindow 移到另一个。
-        这样既保留原来的全部命令和快捷键，又避免 Qt 所有权造成的闪退。
+        QAction 本身仍由 MainWindow 持有，只在模板页增加第二个可视入口，
+        不搬动 QMenuBar/QToolBar 本体，因此既保持原顺序，也避免 Qt 所有权问题。
         """
         source_menu = self._editor.menuBar()
-        target_menu = self.menuBar()
-        target_menu.clear()
+        self._template_menu_bar = QMenuBar(parent)
+        self._template_menu_bar.setObjectName("templateMenuBar")
+        self._template_menu_bar.setNativeMenuBar(False)
         for action in source_menu.actions():
-            target_menu.addAction(action)
-        # 内部菜单隐藏，不再占中间列顶部空间；动作仍由外层菜单复用。
+            self._template_menu_bar.addAction(action)
         source_menu.hide()
 
         source_toolbar = None
@@ -122,13 +129,15 @@ class WorkspaceWindow(QMainWindow):
                 source_toolbar = toolbar
                 break
 
-        self._workspace_toolbar = QToolBar("主工具栏", self)
-        self._workspace_toolbar.setMovable(False)
+        self._template_toolbar = QToolBar("主工具栏", parent)
+        self._template_toolbar.setObjectName("templateMainToolBar")
+        self._template_toolbar.setMovable(False)
+        self._template_toolbar.setFloatable(False)
         if source_toolbar is not None:
+            # actions() 保持 MainWindow 原工具栏的插入顺序，也包括分隔符。
             for action in source_toolbar.actions():
-                self._workspace_toolbar.addAction(action)
+                self._template_toolbar.addAction(action)
             source_toolbar.hide()
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._workspace_toolbar)
 
     def _install_template_query_formatter(self):
         table = self._editor._preview
@@ -198,7 +207,8 @@ class WorkspaceWindow(QMainWindow):
 
     def _on_tab_changed(self, index: int):
         self._sync_side_panel_templates()
-        if index == 1:
+        # 0 = 报表预览；进入预览时同步当前模板，但不显示任何编辑命令。
+        if index == 0:
             self._report_preview.sync_template()
 
     def closeEvent(self, event):
