@@ -44,19 +44,13 @@ class WorkspaceWindow(QMainWindow):
 
         self._report_preview = ReportPreviewPage(self._editor)
 
-        # --------------------------------------------------------------
-        # 报表预览页
-        # --------------------------------------------------------------
         preview_page = QWidget()
         preview_layout = QVBoxLayout(preview_page)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(0)
         preview_layout.addWidget(self._report_preview, 1)
 
-        # --------------------------------------------------------------
-        # 模板编辑页：
-        # [左隐藏控制] [样式栏 |拖拽| 表格 |拖拽| 数据库栏] [右隐藏控制]
-        # --------------------------------------------------------------
+        # 模板编辑页：最外侧只负责隐藏/显示，中间两条 splitter handle 只负责调宽。
         template_page = QWidget()
         template_layout = QVBoxLayout(template_page)
         template_layout.setContentsMargins(0, 0, 0, 0)
@@ -117,27 +111,19 @@ class WorkspaceWindow(QMainWindow):
         editor_row_layout.addWidget(self._left_toggle_strip)
         editor_row_layout.addWidget(main_splitter, 1)
         editor_row_layout.addWidget(self._right_toggle_strip)
-
         template_layout.addWidget(editor_row, 1)
         self._main_splitter = main_splitter
         self._right_panel_container = right
 
-        # --------------------------------------------------------------
-        # 页面层：报表预览 / 模板编辑
-        # --------------------------------------------------------------
         self._tabs = QTabWidget()
         self._tabs.addTab(preview_page, "报表预览")
         self._tabs.addTab(template_page, "模板编辑")
         self._tabs.currentChanged.connect(self._on_tab_changed)
 
-        # --------------------------------------------------------------
-        # 全局层：文件 / 数据库
-        # --------------------------------------------------------------
         workspace = QWidget()
         workspace_layout = QVBoxLayout(workspace)
         workspace_layout.setContentsMargins(0, 0, 0, 0)
         workspace_layout.setSpacing(0)
-
         self._global_menu_bar = self._build_global_menu_bar(workspace)
         workspace_layout.addWidget(self._global_menu_bar)
         workspace_layout.addWidget(self._tabs, 1)
@@ -145,12 +131,12 @@ class WorkspaceWindow(QMainWindow):
 
         self._editor._preview.selection_changed.connect(self._on_editor_selection)
         self._editor._preview.cells_selected.connect(self._on_editor_cells_selected)
-
         self._style_panel.style_changed.connect(self._editor._on_style_changed)
         self._style_panel.style_transaction.connect(self._editor._undo_mgr.record_batch)
 
         self._db_panel._chk_db_enabled.stateChanged.connect(self._time_panel.refresh_availability)
         self._db_panel.database_binding_changed.connect(self._on_binding_changed)
+        self._db_panel._cmb_table.currentTextChanged.connect(self._sync_time_field_choices)
         self._time_panel.time_binding_changed.connect(self._on_binding_changed)
         self._time_panel.time_binding_changed.connect(self._db_panel.refresh_sql_preview)
 
@@ -161,6 +147,7 @@ class WorkspaceWindow(QMainWindow):
 
         self._tabs.setCurrentIndex(0)
         self._report_preview.sync_template()
+        self._sync_time_field_choices()
 
         self._editor.menuBar().hide()
         for toolbar in self._editor.findChildren(QToolBar):
@@ -242,17 +229,21 @@ class WorkspaceWindow(QMainWindow):
                 self._act_refresh_database.setToolTip("重新读取当前数据库的数据表和字段")
                 self._act_refresh_database.triggered.connect(self._refresh_database_metadata)
                 menu.addAction(self._act_refresh_database)
-
             bar.addMenu(menu)
         return bar
 
     def _refresh_database_metadata(self):
         """显式刷新数据库结构；这是模板编辑阶段唯一的元数据联网入口。"""
         ok = self._db_panel.refresh_database_metadata()
-        if ok:
-            self._editor._status_label.setText("数据库已刷新")
-        else:
-            self._editor._status_label.setText("未读取到数据库")
+        self._sync_time_field_choices()
+        self._editor._status_label.setText("数据库已刷新" if ok else "未读取到数据库")
+
+    def _sync_time_field_choices(self, *_args):
+        """把当前数据表的缓存字段同步给时间字段下拉框，不访问数据库。"""
+        table_text = self._db_panel._cmb_table.currentText().strip()
+        table = table_text.split()[0] if table_text else ""
+        fields = self._db_panel._db_metadata.get(table, [])
+        self._time_panel.set_field_choices(fields)
 
     # ==================================================================
     # 模板页第二排：仅模板编辑使用的工具栏
@@ -300,8 +291,6 @@ class WorkspaceWindow(QMainWindow):
         if hasattr(self, "_file_behavior"):
             self._file_behavior.rebuild_guarded_preset_menu()
         self._sync_side_panel_templates()
-        # 不再因为切换模板/执行菜单动作就无条件清空数据库元数据。
-        # DatabaseBindingPanel 会在“数据库配置确实改变”时自行清缓存，但不会联网。
         self._report_preview.sync_template()
 
     def _install_template_query_formatter(self):
@@ -321,6 +310,7 @@ class WorkspaceWindow(QMainWindow):
         template = self._editor._template
         self._style_panel._template = template
         self._db_panel.refresh_template(template)
+        self._sync_time_field_choices()
 
     def _refresh_side_panels(self):
         self._sync_side_panel_templates()
