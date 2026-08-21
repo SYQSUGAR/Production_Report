@@ -3,7 +3,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QGroupBox, QLabel
 
 from ui.workspace_window import WorkspaceWindow
 
@@ -28,6 +28,7 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertIsNotNone(self.window._db_panel)
         self.assertIsNotNone(self.window._time_panel)
         self.assertIsNotNone(self.window._report_preview)
+        self.assertIsNotNone(self.window._file_behavior)
 
     def test_preview_is_first_and_default_tab(self):
         self.assertEqual(self.window._tabs.count(), 2)
@@ -44,12 +45,9 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertTrue(any(t.startswith("文件") for t in titles))
         self.assertTrue(any(t.startswith("数据库") for t in titles))
         self.assertFalse(any(t.startswith("编辑") for t in titles))
-
-        # 全局菜单只有一份，父级是整个 workspace，而不是某一个页签页面。
         self.assertTrue(self.window._global_menu_bar.isVisible())
         self.assertIs(self.window._global_menu_bar.parent(), self.window.centralWidget())
 
-        # 切换到任一页面，全局菜单始终存在。
         self.window._tabs.setCurrentIndex(1)
         self.app.processEvents()
         self.assertTrue(self.window._global_menu_bar.isVisible())
@@ -59,13 +57,10 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertTrue(self.window._global_menu_bar.isVisible())
 
     def test_template_toolbar_is_template_page_only(self):
-        # 默认在预览页，模板编辑工具栏不显示。
         self.assertFalse(self.window._template_toolbar.isVisible())
-
         self.window._tabs.setCurrentIndex(1)
         self.app.processEvents()
         self.assertTrue(self.window._template_toolbar.isVisible())
-
         self.window._tabs.setCurrentIndex(0)
         self.app.processEvents()
         self.assertFalse(self.window._template_toolbar.isVisible())
@@ -102,6 +97,57 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertFalse(hasattr(self.window._style_panel, "_chk_db_enabled"))
         self.assertTrue(hasattr(self.window._db_panel, "_chk_db_enabled"))
         self.assertFalse(hasattr(self.window._db_panel, "_nf_grp"))
+
+    def test_sidebars_can_collapse_to_hover_edge_and_expand_again(self):
+        self.window._tabs.setCurrentIndex(1)
+        self.app.processEvents()
+
+        self.assertFalse(self.window._left_side.collapsed)
+        self.window._left_side.set_collapsed(True)
+        self.app.processEvents()
+        self.assertTrue(self.window._left_side.collapsed)
+        self.assertFalse(self.window._style_group.isVisible())
+        self.assertLessEqual(self.window._left_side.maximumWidth(), 18)
+
+        self.window._left_side.set_collapsed(False)
+        self.app.processEvents()
+        self.assertFalse(self.window._left_side.collapsed)
+        self.assertTrue(self.window._style_group.isVisible())
+
+        self.assertFalse(self.window._right_side.collapsed)
+        self.window._right_side.set_collapsed(True)
+        self.app.processEvents()
+        self.assertTrue(self.window._right_side.collapsed)
+        self.assertFalse(self.window._db_group.isVisible())
+        self.window._right_side.set_collapsed(False)
+        self.app.processEvents()
+        self.assertFalse(self.window._right_side.collapsed)
+
+    def test_side_panel_headers_match_requested_hierarchy(self):
+        self.assertEqual(self.window._style_group.title(), "字体 / 样式 / 边框")
+        self.assertEqual(self.window._db_group.title(), "数据库绑定与时间条件")
+
+        # 数据库栏不再显示“当前选中范围”。
+        visible_group_titles = [
+            g.title() for g in self.window._db_panel.findChildren(QGroupBox)
+            if not g.isHidden()
+        ]
+        self.assertNotIn("当前选中范围", visible_group_titles)
+
+        labels = [label.text() for label in self.window._db_panel.findChildren(QLabel)]
+        self.assertIn("数据库绑定", labels)
+        time_labels = [label.text() for label in self.window._time_panel.findChildren(QLabel)]
+        self.assertIn("时间绑定", time_labels)
+
+    def test_dirty_snapshot_detects_template_change(self):
+        behavior = self.window._file_behavior
+        self.assertFalse(behavior.is_dirty())
+        cd = self.window._editor._template.get_cell_data(0, 0)
+        cd.static_text = "dirty-test"
+        self.window._editor._template.set_cell_data(0, 0, cd)
+        self.assertTrue(behavior.is_dirty())
+        behavior.mark_clean()
+        self.assertFalse(behavior.is_dirty())
 
 
 if __name__ == "__main__":
