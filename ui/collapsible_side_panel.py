@@ -1,18 +1,18 @@
 """模板编辑页左右侧栏：拖拽调宽与收起/展开使用独立交互区域。"""
 
 from PyQt6.QtCore import Qt, QEvent
-from PyQt6.QtGui import QColor, QPainter, QPen, QFont
+from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import QWidget, QSplitter, QSplitterHandle
 
 
 class _SidebarToggleStrip(QWidget):
     """独立于 QSplitterHandle 的侧栏收起/展开热区。
 
-    左侧栏的拖拽线与本控件完全分离；右侧数据库栏不允许拖动，只保留
-    本控件用于隐藏/展开。控件平时透明，鼠标进入后显示细竖条和中部箭头。
+    本控件只负责点击收起/展开，不参与拖拽。平时透明，鼠标进入后显示
+    一条贴边的细长控制带，并在高度中部绘制清晰箭头。
     """
 
-    HOT_WIDTH = 18
+    HOT_WIDTH = 16
 
     def __init__(self, splitter, side_name: str):
         super().__init__(splitter)
@@ -23,7 +23,6 @@ class _SidebarToggleStrip(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("点击收起/展开侧栏")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.raise_()
 
@@ -61,32 +60,34 @@ class _SidebarToggleStrip(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        # 视觉只是一条很窄的悬停控制带，实际命中宽度稍大，方便操作。
-        painter.fillRect(self.rect(), QColor(238, 243, 249, 190))
+        # 热区宽度适合点击，但视觉条保持很窄，不挡表格。
+        painter.fillRect(self.rect(), QColor(238, 243, 249, 215))
         x = self.width() // 2
-        painter.setPen(QPen(QColor("#9AA4B2"), 1))
-        painter.drawLine(x, 3, x, max(3, self.height() - 3))
+        painter.setPen(QPen(QColor("#98A2B1"), 1))
+        painter.drawLine(x, 2, x, max(2, self.height() - 2))
 
         direction = self._splitter.arrow_direction(self._side_name)
         cy = self.height() // 2
 
-        # 用清晰的大号单箭头替代之前过小的折线，保证实际界面中能看到。
-        painter.setPen(QColor("#1A73E8"))
-        font = QFont()
-        font.setPixelSize(19)
-        font.setBold(True)
-        painter.setFont(font)
-        glyph = "‹" if direction == "left" else "›"
-        arrow_rect = self.rect().adjusted(0, cy - 15, 0, -(self.height() - cy - 15))
-        painter.drawText(arrow_rect, Qt.AlignmentFlag.AlignCenter, glyph)
+        # 不使用字体字符，直接画折线箭头，避免不同系统字体下箭头消失。
+        painter.setPen(QPen(
+            QColor("#1677FF"), 2.2,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        ))
+        half_w = 4
+        half_h = 6
+        if direction == "left":
+            painter.drawLine(x + half_w, cy - half_h, x - half_w, cy)
+            painter.drawLine(x - half_w, cy, x + half_w, cy + half_h)
+        else:
+            painter.drawLine(x - half_w, cy - half_h, x + half_w, cy)
+            painter.drawLine(x + half_w, cy, x - half_w, cy + half_h)
 
 
 class _SidebarResizeHandle(QSplitterHandle):
-    """只负责尺寸拖拽的分隔线。
-
-    右侧数据库栏的分隔线会被配置为 fixed，从而不再显示拖拽光标，
-    也不接受拖动；左侧字体栏仍保留正常的宽度调整能力。
-    """
+    """只负责尺寸拖拽的分隔线，绝不处理隐藏/展开点击。"""
 
     def __init__(self, orientation, parent):
         super().__init__(orientation, parent)
@@ -123,8 +124,12 @@ class _SidebarResizeHandle(QSplitterHandle):
 class CollapsibleSplitter(QSplitter):
     """三栏编辑区的 QSplitter。
 
-    左侧字体栏：可拖动调宽 + 独立隐藏/展开热区。
-    右侧数据库栏：固定宽度 + 独立隐藏/展开热区，不允许拖动边界。
+    左侧字体栏和右侧数据库栏都只允许从“靠表格的一侧”调整宽度：
+    - 字体栏：右边界可拖动；
+    - 数据库栏：左边界可拖动；
+    数据库栏最右侧是窗口外边缘，不存在任何额外拖动边界。
+
+    两侧的隐藏/展开都由独立悬停控制带完成，与拖拽分隔线完全分开。
     """
 
     def __init__(self, parent=None):
@@ -134,6 +139,7 @@ class CollapsibleSplitter(QSplitter):
         self._side_specs = {}
         self._toggle_strips = {}
         self.installEventFilter(self)
+        self.splitterMoved.connect(lambda *_: self._position_toggle_strips())
 
     def createHandle(self):
         return _SidebarResizeHandle(self.orientation(), self)
@@ -181,38 +187,14 @@ class CollapsibleSplitter(QSplitter):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._enforce_fixed_sides()
         self._position_toggle_strips()
 
     def moveEvent(self, event):
         super().moveEvent(event)
         self._position_toggle_strips()
 
-    def _enforce_fixed_sides(self):
-        """保证展开状态下不可缩放侧栏维持设定宽度。"""
-        if not self._side_specs:
-            return
-        sizes = self.sizes()
-        changed = False
-        for spec in self._side_specs.values():
-            if spec["resizable"]:
-                continue
-            panel_index = spec["panel_index"]
-            center_index = spec["center_index"]
-            if sizes[panel_index] <= 1:
-                continue
-            target = spec["expanded_width"]
-            delta = target - sizes[panel_index]
-            if delta == 0:
-                continue
-            sizes[panel_index] = target
-            sizes[center_index] = max(0, sizes[center_index] - delta)
-            changed = True
-        if changed:
-            self.setSizes(sizes)
-
     def _position_toggle_strips(self):
-        """隐藏/展示热区与拖拽区域分开，并始终抬到最前层。"""
+        """把隐藏控制带放在拖拽线的表格一侧，两种操作区域不重叠。"""
         if not self._side_specs:
             return
 
@@ -226,16 +208,17 @@ class CollapsibleSplitter(QSplitter):
 
             hg = handle.geometry()
             if side_name == "left":
-                # 左侧：侧栏 | 拖拽线 | 隐藏热区 | 表格
+                # 字体栏 | 拖拽线 | 隐藏热区 | 表格
                 x = hg.right() + 1
             else:
-                # 右侧：表格 | 隐藏热区 | 固定边界 | 数据库栏
+                # 表格 | 隐藏热区 | 拖拽线 | 数据库栏
                 x = hg.left() - width
 
             x = max(0, min(x, max(0, self.width() - width)))
             strip.setGeometry(x, 0, width, height)
             strip.show()
             strip.raise_()
+            strip.update()
 
     def side_collapsed(self, side_name: str) -> bool:
         spec = self._side_specs[side_name]
@@ -273,19 +256,15 @@ class CollapsibleSplitter(QSplitter):
                 return
             widget.setMinimumWidth(spec["minimum_width"])
             widget.setMaximumWidth(spec["maximum_width"])
-            if spec["resizable"]:
-                target = max(
-                    spec["last_width"], spec["expanded_width"], spec["minimum_width"]
-                )
-            else:
-                target = spec["expanded_width"]
+            target = max(
+                spec["last_width"], spec["expanded_width"], spec["minimum_width"]
+            )
             available = max(0, sizes[center_index] - 260)
             restore = min(target, available) if available else target
             sizes[panel_index] = restore
             sizes[center_index] = max(0, sizes[center_index] - restore)
             self.setSizes(sizes)
 
-        self._enforce_fixed_sides()
         self._position_toggle_strips()
         strip = self._toggle_strips.get(side_name)
         if strip is not None:
