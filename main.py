@@ -6,7 +6,7 @@ import traceback
 from datetime import datetime
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QLibraryInfo, QLocale, QTranslator
 from PyQt6.QtGui import QFont
 
 from ui.workspace_window import WorkspaceWindow
@@ -42,12 +42,33 @@ def _exception_hook(exc_type, exc_value, exc_tb):
             pass
 
 
+def _install_chinese_qt_translation(app: QApplication):
+    """统一把 Qt 自带按钮/系统对话框切换为中文。
+
+    这样 QMessageBox 的 Save/Discard/Cancel/Yes/No/OK 等标准按钮不会再
+    因操作系统或 Qt 默认语言而显示英文。翻译文件缺失时应用仍可正常启动。
+    """
+    QLocale.setDefault(QLocale(QLocale.Language.Chinese, QLocale.Country.China))
+    translations_path = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+
+    translators = []
+    for base_name in ("qtbase_zh_CN", "qt_zh_CN"):
+        translator = QTranslator(app)
+        if translator.load(base_name, translations_path):
+            app.installTranslator(translator)
+            translators.append(translator)
+
+    # QTranslator 必须保持引用，否则会被回收而失效。
+    app._qt_zh_translators = translators
+
+
 def main():
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
     app.setApplicationName("生产报表模板编辑与预览")
+    _install_chinese_qt_translation(app)
     sys.excepthook = _exception_hook
 
     font = QFont()
