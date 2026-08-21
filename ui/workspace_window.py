@@ -3,7 +3,7 @@
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QSplitter, QTabWidget, QGroupBox,
-    QToolBar, QMenuBar, QMenu,
+    QToolBar, QMenuBar, QMenu, QLabel,
 )
 
 from models.value_formatter import format_display_value
@@ -12,6 +12,8 @@ from ui.report_preview_page import ReportPreviewPage
 from ui.time_binding_panel import TimeBindingPanel
 from ui.editor_side_panels import StyleOnlyPanel, DatabaseBindingPanel
 from ui.editor_history import install_editor_history
+from ui.collapsible_side_panel import CollapsibleSideContainer
+from ui.workspace_behaviors import WorkspaceFileBehavior
 
 
 class WorkspaceWindow(QMainWindow):
@@ -26,7 +28,6 @@ class WorkspaceWindow(QMainWindow):
         self.setWindowTitle("生产报表模板编辑与预览")
         self.resize(1760, 920)
 
-        # MainWindow 继续作为模板编辑核心和命令提供者。
         self._editor = MainWindow()
         self._editor._style_panel.hide()
         self._install_template_query_formatter()
@@ -42,11 +43,12 @@ class WorkspaceWindow(QMainWindow):
             undo_manager=self._editor._undo_mgr,
         )
         self._protect_time_binding_from_db_panel_refresh(self._db_panel)
+        self._prepare_side_panel_headers()
 
         self._report_preview = ReportPreviewPage(self._editor)
 
         # --------------------------------------------------------------
-        # 报表预览页：这里只放预览自身内容，不再重复放“文件/数据库”。
+        # 报表预览页
         # --------------------------------------------------------------
         preview_page = QWidget()
         preview_layout = QVBoxLayout(preview_page)
@@ -55,7 +57,7 @@ class WorkspaceWindow(QMainWindow):
         preview_layout.addWidget(self._report_preview, 1)
 
         # --------------------------------------------------------------
-        # 模板编辑页：第二排编辑工具栏 + 三栏编辑区。
+        # 模板编辑页：编辑工具栏 + 可收起左右侧栏 + 表格
         # --------------------------------------------------------------
         template_page = QWidget()
         template_layout = QVBoxLayout(template_page)
@@ -66,17 +68,32 @@ class WorkspaceWindow(QMainWindow):
         template_layout.addWidget(self._template_toolbar)
 
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_splitter.addWidget(self._style_panel)
+        main_splitter.setChildrenCollapsible(False)
+
+        # 左侧标题放在最上方，当前选区仍保留在标题下面。
+        self._style_group = QGroupBox("字体 / 样式 / 边框")
+        style_group_layout = QVBoxLayout(self._style_group)
+        style_group_layout.setContentsMargins(4, 6, 4, 4)
+        style_group_layout.addWidget(self._style_panel)
+        self._style_group.setMinimumWidth(295)
+        self._style_group.setMaximumWidth(370)
+        self._left_side = CollapsibleSideContainer(
+            self._style_group, "left", expanded_width=320
+        )
+        main_splitter.addWidget(self._left_side)
+
         main_splitter.addWidget(self._editor)
 
         right = QWidget()
+        right.setMinimumWidth(400)
+        right.setMaximumWidth(550)
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(6)
 
-        db_group = QGroupBox("数据库绑定与时间条件")
-        db_layout = QVBoxLayout(db_group)
-        db_layout.setContentsMargins(4, 4, 4, 4)
+        self._db_group = QGroupBox("数据库绑定与时间条件")
+        db_layout = QVBoxLayout(self._db_group)
+        db_layout.setContentsMargins(4, 6, 4, 4)
         vertical = QSplitter(Qt.Orientation.Vertical)
         vertical.addWidget(self._db_panel)
         vertical.addWidget(self._time_panel)
@@ -84,17 +101,21 @@ class WorkspaceWindow(QMainWindow):
         vertical.setStretchFactor(0, 1)
         vertical.setStretchFactor(1, 0)
         db_layout.addWidget(vertical)
-        right_layout.addWidget(db_group)
+        right_layout.addWidget(self._db_group)
 
-        main_splitter.addWidget(right)
-        main_splitter.setSizes([310, 1030, 430])
+        self._right_side = CollapsibleSideContainer(
+            right, "right", expanded_width=450
+        )
+        main_splitter.addWidget(self._right_side)
+        main_splitter.setSizes([330, 1000, 470])
         main_splitter.setStretchFactor(0, 0)
         main_splitter.setStretchFactor(1, 1)
         main_splitter.setStretchFactor(2, 0)
         template_layout.addWidget(main_splitter, 1)
+        self._main_splitter = main_splitter
 
         # --------------------------------------------------------------
-        # 页面层：报表预览 / 模板编辑。
+        # 页面层：报表预览 / 模板编辑
         # --------------------------------------------------------------
         self._tabs = QTabWidget()
         self._tabs.addTab(preview_page, "报表预览")
@@ -102,8 +123,7 @@ class WorkspaceWindow(QMainWindow):
         self._tabs.currentChanged.connect(self._on_tab_changed)
 
         # --------------------------------------------------------------
-        # 全局层：文件 / 数据库。
-        # 视觉和逻辑层级都位于页面页签之上，只保留一份。
+        # 全局层：文件 / 数据库
         # --------------------------------------------------------------
         workspace = QWidget()
         workspace_layout = QVBoxLayout(workspace)
@@ -129,10 +149,10 @@ class WorkspaceWindow(QMainWindow):
 
         install_editor_history(self._editor, after_change=self._refresh_side_panels)
 
-        # 全局文件/数据库动作执行后，统一刷新两个页面使用的工作区状态。
+        # 数据库等全局动作仍走统一刷新；随后文件动作升级为“未保存保护”。
         self._wire_global_menu_refresh()
+        self._file_behavior = WorkspaceFileBehavior(self, self._editor)
 
-        # 默认先进入报表预览。
         self._tabs.setCurrentIndex(0)
         self._report_preview.sync_template()
 
@@ -143,10 +163,56 @@ class WorkspaceWindow(QMainWindow):
                 toolbar.hide()
 
     # ==================================================================
+    # 侧栏标题与分区视觉
+    # ==================================================================
+    def _flatten_toolbox_page(self, panel):
+        """把只有一个页面的 QToolBox 去掉按钮式页签，只保留实际设置内容。"""
+        toolbox = getattr(panel, "_toolbox", None)
+        if toolbox is None or toolbox.count() == 0:
+            return None
+        page = toolbox.widget(0)
+        toolbox.removeItem(0)
+        panel._main_layout.removeWidget(toolbox)
+        toolbox.hide()
+        page.setParent(panel._container)
+        return page
+
+    def _prepare_side_panel_headers(self):
+        # 左侧：外层 QGroupBox 提供“字体 / 样式 / 边框”标题；内部不再显示
+        # 看起来像按钮的 QToolBox 标题。“当前选中范围”继续保留。
+        style_page = self._flatten_toolbox_page(self._style_panel)
+        if style_page is not None:
+            self._style_panel._main_layout.insertWidget(1, style_page, 1)
+
+        # 右侧：不显示“当前选中范围”，数据库和时间各有独立醒目标题。
+        selection_label = getattr(self._db_panel, "_lbl_scope", None)
+        if selection_label is not None and selection_label.parentWidget() is not None:
+            selection_label.parentWidget().hide()
+
+        db_page = self._flatten_toolbox_page(self._db_panel)
+        if db_page is not None:
+            db_title = QLabel("数据库绑定")
+            db_title.setStyleSheet(
+                "font-weight:bold; font-size:14px; color:#174EA6; "
+                "background:#E8F0FE; border-left:3px solid #1A73E8; "
+                "padding:6px 8px;"
+            )
+            self._db_panel._main_layout.insertWidget(0, db_title)
+            self._db_panel._main_layout.insertWidget(1, db_page, 1)
+
+        for label in self._time_panel.findChildren(QLabel):
+            if label.text() == "时间绑定":
+                label.setStyleSheet(
+                    "font-weight:bold; font-size:14px; color:#8A4B08; "
+                    "background:#FFF4E5; border-left:3px solid #F29900; "
+                    "padding:6px 8px;"
+                )
+                break
+
+    # ==================================================================
     # 全局第一排：文件 / 数据库
     # ==================================================================
     def _source_global_menus(self):
-        """返回 MainWindow 中需要提升为全局能力的菜单；显式排除“编辑”。"""
         result = []
         for action in self._editor.menuBar().actions():
             menu = action.menu()
@@ -158,7 +224,6 @@ class WorkspaceWindow(QMainWindow):
         return result
 
     def _build_global_menu_bar(self, parent: QWidget) -> QMenuBar:
-        """构造工作区唯一的“文件 / 数据库”菜单栏。"""
         bar = QMenuBar(parent)
         bar.setObjectName("globalWorkspaceMenuBar")
         bar.setNativeMenuBar(False)
@@ -174,7 +239,6 @@ class WorkspaceWindow(QMainWindow):
     # 模板页第二排：仅模板编辑使用的工具栏
     # ==================================================================
     def _build_template_toolbar(self, parent: QWidget) -> QToolBar:
-        """按 MainWindow 原工具栏顺序复制模板编辑动作。"""
         source_toolbar = None
         for toolbar in self._editor.findChildren(QToolBar):
             if toolbar.windowTitle() == "主工具栏":
@@ -202,7 +266,6 @@ class WorkspaceWindow(QMainWindow):
                 yield action
 
     def _wire_global_menu_refresh(self):
-        """文件/数据库动作完成后统一刷新工作区；兼容动态重建的预设菜单。"""
         for menu in self._source_global_menus():
             for action in self._iter_leaf_actions(menu):
                 if action.property("workspace_global_refresh_connected"):
@@ -211,21 +274,15 @@ class WorkspaceWindow(QMainWindow):
                 action.setProperty("workspace_global_refresh_connected", True)
 
     def _schedule_global_refresh(self, *_args):
-        # 让原 QAction 的文件/数据库槽先完整执行，再读取最终状态。
         QTimer.singleShot(0, self._refresh_after_global_action)
 
     def _refresh_after_global_action(self):
-        # 文件菜单中的“预设模板”可能被动态重建，先补齐新 QAction 的连接。
         self._wire_global_menu_refresh()
-
-        # 模板编辑侧与当前 editor._template 保持同一真值。
+        if hasattr(self, "_file_behavior"):
+            # 导入/删除预设会让 MainWindow 重建原菜单，这里重新套上未保存保护。
+            self._file_behavior.rebuild_guarded_preset_menu()
         self._sync_side_panel_templates()
-
-        # 数据库配置可能已经变化，丢弃旧元数据缓存；下次需要时重新读取。
         self._db_panel._db_metadata = {}
-
-        # 报表预览重新克隆当前模板，因此静态数据、查询绑定、数据库配置、
-        # 时间规则、样式、合并及尺寸等都会同步到预览页。
         self._report_preview.sync_template()
 
     def _install_template_query_formatter(self):
@@ -247,7 +304,6 @@ class WorkspaceWindow(QMainWindow):
         self._db_panel.refresh_template(template)
 
     def _refresh_side_panels(self):
-        """撤销/恢复/粘贴等操作后，从模板真值重新加载左右属性栏。"""
         self._sync_side_panel_templates()
         scope, row, col = self._editor._preview.get_current_scope_info()
         cells = self._editor._preview.get_selected_cells()
@@ -276,7 +332,6 @@ class WorkspaceWindow(QMainWindow):
         self._time_panel.set_selection(row, col, scope)
 
     def _protect_time_binding_from_db_panel_refresh(self, panel):
-        """数据库查询控件重建 QueryBinding 时保留当前时间规则。"""
         original = getattr(panel, "_collect_db_binding", None)
         if original is None:
             return
