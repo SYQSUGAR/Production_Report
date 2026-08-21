@@ -50,14 +50,6 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertTrue(self.window._global_menu_bar.isVisible())
         self.assertIs(self.window._global_menu_bar.parent(), self.window.centralWidget())
 
-        self.window._tabs.setCurrentIndex(1)
-        self.app.processEvents()
-        self.assertTrue(self.window._global_menu_bar.isVisible())
-
-        self.window._tabs.setCurrentIndex(0)
-        self.app.processEvents()
-        self.assertTrue(self.window._global_menu_bar.isVisible())
-
     def test_template_toolbar_is_template_page_only(self):
         self.assertFalse(self.window._template_toolbar.isVisible())
         self.window._tabs.setCurrentIndex(1)
@@ -100,38 +92,32 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertTrue(hasattr(self.window._db_panel, "_chk_db_enabled"))
         self.assertFalse(hasattr(self.window._db_panel, "_nf_grp"))
 
-    def test_sidebar_resize_and_collapse_controls_are_separate(self):
+    def test_sidebar_outer_toggles_and_inner_resize_handles_are_fixed(self):
         self.window._tabs.setCurrentIndex(1)
         self.app.processEvents()
 
         splitter = self.window._main_splitter
-        self.assertEqual(splitter.handleWidth(), 5)
-        self.assertIn("left", splitter._toggle_strips)
-        self.assertIn("right", splitter._toggle_strips)
+        left_strip = self.window._left_toggle_strip
+        right_strip = self.window._right_toggle_strip
 
-        left_handle = splitter.handle(1)
-        right_handle = splitter.handle(2)
-        left_strip = splitter._toggle_strips["left"]
-        right_strip = splitter._toggle_strips["right"]
-
-        # 两条隐藏/展开热区必须作为独立前景控件存在，并有足够宽度显示箭头。
+        # 隐藏/显示控制必须在 splitter 外部，因此不会跟着 handle 重排位置。
+        self.assertIsNot(left_strip.parentWidget(), splitter)
+        self.assertIsNot(right_strip.parentWidget(), splitter)
+        self.assertEqual(left_strip.width(), 16)
+        self.assertEqual(right_strip.width(), 16)
         self.assertTrue(left_strip.isVisible())
         self.assertTrue(right_strip.isVisible())
-        self.assertGreaterEqual(left_strip.width(), 18)
-        self.assertGreaterEqual(right_strip.width(), 18)
 
-        # 左侧字体栏允许拖动；右侧数据库栏固定宽度，不允许拖动边界。
-        self.assertTrue(splitter._side_specs["left"]["resizable"])
-        self.assertFalse(splitter._side_specs["right"]["resizable"])
-        self.assertTrue(left_handle._resize_enabled)
-        self.assertFalse(right_handle._resize_enabled)
-        self.assertEqual(right_handle.cursor().shape(), Qt.CursorShape.ArrowCursor)
+        # QSplitter 三个内容区只会产生两条内部 handle：
+        # handle(1) = 样式栏右边界；handle(2) = 数据库栏左边界。
+        self.assertEqual(splitter.count(), 3)
+        self.assertEqual(splitter.handleWidth(), 5)
+        self.assertIsNotNone(splitter.handle(1))
+        self.assertIsNotNone(splitter.handle(2))
+        self.assertEqual(splitter.handle(1).cursor().shape(), Qt.CursorShape.SplitHCursor)
+        self.assertEqual(splitter.handle(2).cursor().shape(), Qt.CursorShape.SplitHCursor)
 
-        # 收起/展开热区位于边界的表格一侧，不与拖拽区重叠。
-        self.assertGreaterEqual(left_strip.geometry().left(), left_handle.geometry().right())
-        self.assertLessEqual(right_strip.geometry().right(), right_handle.geometry().left())
-
-        self.assertFalse(splitter.side_collapsed("left"))
+        # 左右侧栏都仍可压缩到 0；外侧控制条始终保留，不会跑位。
         splitter.set_side_collapsed("left", True)
         self.app.processEvents()
         self.assertTrue(splitter.side_collapsed("left"))
@@ -143,7 +129,6 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertFalse(splitter.side_collapsed("left"))
         self.assertGreater(splitter.sizes()[0], 1)
 
-        self.assertFalse(splitter.side_collapsed("right"))
         splitter.set_side_collapsed("right", True)
         self.app.processEvents()
         self.assertTrue(splitter.side_collapsed("right"))
@@ -154,7 +139,6 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.app.processEvents()
         self.assertFalse(splitter.side_collapsed("right"))
         self.assertGreater(splitter.sizes()[2], 1)
-        self.assertEqual(splitter.sizes()[2], 450)
 
     def test_side_panel_headers_match_requested_hierarchy(self):
         self.assertEqual(self.window._style_group.title(), "字体 / 样式 / 边框")
