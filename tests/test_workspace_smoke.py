@@ -100,31 +100,44 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertTrue(hasattr(self.window._db_panel, "_chk_db_enabled"))
         self.assertFalse(hasattr(self.window._db_panel, "_nf_grp"))
 
-    def test_sidebars_collapse_to_zero_but_splitter_handles_remain(self):
+    def test_sidebar_resize_and_collapse_controls_are_separate(self):
         self.window._tabs.setCurrentIndex(1)
         self.app.processEvents()
 
         splitter = self.window._main_splitter
-        self.assertEqual(splitter.handleWidth(), 10)
-        self.assertFalse(splitter.side_collapsed("left"))
-        self.assertFalse(splitter.side_collapsed("right"))
+        self.assertEqual(splitter.handleWidth(), 5)
+        self.assertIn("left", splitter._toggle_strips)
+        self.assertIn("right", splitter._toggle_strips)
 
+        left_handle = splitter.handle(1)
+        right_handle = splitter.handle(2)
+        left_strip = splitter._toggle_strips["left"]
+        right_strip = splitter._toggle_strips["right"]
+
+        # 收起/展开热区位于拖拽 handle 的表格一侧，而不是与 handle 重叠。
+        self.assertGreaterEqual(left_strip.geometry().left(), left_handle.geometry().right())
+        self.assertLessEqual(right_strip.geometry().right(), right_handle.geometry().left())
+
+        self.assertFalse(splitter.side_collapsed("left"))
         splitter.set_side_collapsed("left", True)
         self.app.processEvents()
         self.assertTrue(splitter.side_collapsed("left"))
         self.assertLessEqual(splitter.sizes()[0], 1)
-        self.assertTrue(splitter.handle(1).isVisible())
+        self.assertTrue(left_handle.isVisible())
+        self.assertTrue(left_strip.isVisible())
 
         splitter.set_side_collapsed("left", False)
         self.app.processEvents()
         self.assertFalse(splitter.side_collapsed("left"))
         self.assertGreater(splitter.sizes()[0], 1)
 
+        self.assertFalse(splitter.side_collapsed("right"))
         splitter.set_side_collapsed("right", True)
         self.app.processEvents()
         self.assertTrue(splitter.side_collapsed("right"))
         self.assertLessEqual(splitter.sizes()[2], 1)
-        self.assertTrue(splitter.handle(2).isVisible())
+        self.assertTrue(right_handle.isVisible())
+        self.assertTrue(right_strip.isVisible())
 
         splitter.set_side_collapsed("right", False)
         self.app.processEvents()
