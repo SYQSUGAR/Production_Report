@@ -6,19 +6,38 @@
 
 from copy import deepcopy
 
-from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import QGroupBox, QPushButton
+from PyQt6.QtCore import Qt, QEvent, QObject, QTimer, pyqtSignal
+from PyQt6.QtWidgets import QGroupBox, QPushButton, QLabel, QComboBox
 
 from ui.style_panel import StylePanel
 from models.template_model import CellStyle, CellData
 from models.db_config import QueryBinding, QueryType
 
 
+class _ComboPopupFilter(QObject):
+    """让可输入下拉框在获得焦点/点击时自动展开。
+
+    下拉内容来自已经缓存的数据库元数据；这里只负责本地交互，不访问数据库。
+    """
+
+    def __init__(self, combo: QComboBox, parent=None):
+        super().__init__(parent or combo)
+        self._combo = combo
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.Type.FocusIn, QEvent.Type.MouseButtonPress):
+            QTimer.singleShot(0, self._show_popup)
+        return False
+
+    def _show_popup(self):
+        if self._combo.isEnabled() and self._combo.isVisible():
+            self._combo.showPopup()
+
+
 class StyleOnlyPanel(StylePanel):
     """左侧：只负责字体、颜色、对齐、边框和数字格式。"""
 
     def _build_db_group(self):
-        """左侧构造时就不创建数据库控件，避免隐藏控件与右侧串状态。"""
         return
 
     def __init__(self, template, parent=None):
@@ -36,7 +55,6 @@ class StyleOnlyPanel(StylePanel):
                 button.hide()
 
     def set_current_selection(self, scope: str, row: int, col: int):
-        """左侧只同步样式，完全不读取数据库表单。"""
         self._set_selection_context(scope, row, col)
         self._load_style_for_current_scope()
 
@@ -67,23 +85,26 @@ class StyleOnlyPanel(StylePanel):
 class DatabaseBindingPanel(StylePanel):
     """右侧：只负责数据库绑定和 SQL。
 
-    多选时无论是单行、单列还是多行多列，当前选中的所有单元格都是目标。
-    所有编辑均采用增量 patch；例如只改字段名，就不会覆盖各单元格原有的
-    表名、筛选条件、SQL、时间绑定等其他配置。
+    数据库元数据只在用户显式执行“数据库 → 刷新数据库”时读取一次并缓存。
+    切换单元格、启用绑定、输入字段等操作都只使用缓存，不主动访问数据库。
     """
 
     database_binding_changed = pyqtSignal()
 
     def _build_style_group(self):
-        """右侧构造时就不创建样式控件，彻底消除左右控件重叠。"""
         return
 
     def __init__(self, template, parent=None, metadata_provider=None, undo_manager=None):
         self._undo_manager = undo_manager
+        self._metadata_config_signature = None
+        self._combo_popup_filters = []
         super().__init__(template, parent=parent, metadata_provider=metadata_provider)
         self.setMinimumWidth(380)
         self.setMaximumWidth(520)
         self._hide_legacy_actions()
+        self._hide_date_placeholder_ui()
+        self._prepare_identifier_combos()
+        self._set_metadata_unread_state()
 
     def _hide_legacy_actions(self):
         for group in self.findChildren(QGroupBox):
@@ -92,17 +113,117 @@ class DatabaseBindingPanel(StylePanel):
         for button in self.findChildren(QPushButton):
             if button.text() in ("清除当前范围", "清除全部", "清除"):
                 button.hide()
+        # 元数据刷新统一放到第一排“数据库 → 刷新数据库”，侧栏不再有第二个入口。
+        if hasattr(self, "_btn_refresh_metadata"):
+            self._btn_refresh_metadata.hide()
+
+    def _hide_date_placeholder_ui(self):
+        """日期占位符不再作为数据库绑定配置项展示。"""
+        if hasattr(self, "_txt_date_ph"):
+            self._txt_date_ph.hide()
+        for label in self.findChildren(QLabel):
+            if label.text().strip().startswith("日期占位符"):
+                label.hide()
+
+    def _prepare_identifier_combos(self):
+        for combo in (
+            self._cmb_table,
+            self._cmb_field,
+            self._cmb_join_table,
+            self._cmb_join_left,
+            self._cmb_join_right,
+        ):
+            self._configure_identifier_combo(combo)
+        for row in self._filter_rows:
+            self._configure_identifier_combo(row["field_combo"])
+
+    def _configure_identifier_combo(self, combo: QComboBox):
+        if combo.property("identifier_combo_ready"):
+            return
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        completer = combo.completer()
+        if completer is not None:
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            completer.setCompletionMode(completer.CompletionMode.PopupCompletion)
+
+        line_edit = combo.lineEdit()
+        popup_filter = _ComboPopupFilter(combo, combo)
+        line_edit.installEventFilter(popup_filter)
+        self._combo_popup_filters.append(popup_filter)
+
+        def show_filtered_popup(_text, c=combo):
+            comp = c.completer()
+            if comp is not None and c.isEnabled() and c.isVisible():
+                QTimer.singleShot(0, comp.complete)
+
+        line_edit.textEdited.connect(show_filtered_popup)
+        combo.setProperty("identifier_combo_ready", True)
 
     def set_current_selection(self, scope: str, row: int, col: int):
-        """右侧只同步数据库绑定，完全不读取样式表单。"""
         self._set_selection_context(scope, row, col)
         self._load_db_binding()
 
+    def _db_config_signature(self, template=None):
+        template = template or self._template
+        cfg = template.db_configs.get("default") if template else None
+        if cfg is None:
+            return None
+        attrs = ("db_type", "host", "port", "user", "database", "charset")
+        return tuple(getattr(cfg, name, None) for name in attrs)
+
     def refresh_template(self, template):
+        """切换模板时保留同一数据库的缓存；数据源变化则只清缓存、不联网。"""
         self._template = template
+        if (
+            self._metadata_config_signature is not None
+            and self._metadata_config_signature != self._db_config_signature(template)
+        ):
+            self.clear_database_metadata()
 
     def refresh_sql_preview(self):
         self._update_sql_preview()
+
+    def _set_metadata_unread_state(self):
+        self._lbl_metadata_state.setText("未读取到数据库")
+        self._lbl_metadata_state.setStyleSheet("color:#B06000;")
+
+    def clear_database_metadata(self):
+        """清除缓存和下拉候选，但保留用户当前已经输入的文本。"""
+        self._db_metadata = {}
+        self._metadata_config_signature = None
+        self._set_combo_choices(self._cmb_table, [])
+        self._set_combo_choices(self._cmb_join_table, [])
+        self._refresh_identifier_choices()
+        self._set_metadata_unread_state()
+
+    def refresh_database_metadata(self) -> bool:
+        """唯一的主动数据库元数据刷新入口。"""
+        provider = self._metadata_provider
+        metadata = provider("default") if provider else {}
+        self._db_metadata = metadata or {}
+        self._metadata_config_signature = self._db_config_signature()
+
+        tables = sorted(self._db_metadata, key=str.lower)
+        self._set_combo_choices(self._cmb_table, tables)
+        self._set_combo_choices(self._cmb_join_table, tables)
+        self._refresh_identifier_choices()
+
+        if not tables:
+            self._set_metadata_unread_state()
+            return False
+
+        column_count = sum(len(items) for items in self._db_metadata.values())
+        self._lbl_metadata_state.setText(
+            f"数据库已刷新：{len(tables)} 个数据表，{column_count} 个字段"
+        )
+        self._lbl_metadata_state.setStyleSheet("color:#287A3D;")
+        return True
+
+    # 兼容 StylePanel 原按钮/调用名称，但不会由单元格选择自动触发。
+    def _refresh_db_metadata(self):
+        return self.refresh_database_metadata()
 
     # ==================================================================
     # 多选目标与增量 patch
@@ -116,10 +237,6 @@ class DatabaseBindingPanel(StylePanel):
         return []
 
     def _apply_db_patch(self, patch: dict):
-        """只修改 patch 中明确给出的 QueryBinding 属性。
-
-        一次操作作用于整个当前选区，并只生成一个 undo batch。
-        """
         if self._suppress_update or not patch:
             return
         targets = self._target_cells()
@@ -159,7 +276,7 @@ class DatabaseBindingPanel(StylePanel):
         return deepcopy(self._collect_db_binding().joins)
 
     # ==================================================================
-    # 数据库控件状态：不再访问任何样式/数字格式控件
+    # 数据库控件状态
     # ==================================================================
     def _update_db_ui_state(self):
         enabled = self._chk_db_enabled.isChecked()
@@ -177,9 +294,8 @@ class DatabaseBindingPanel(StylePanel):
     # 各控件只 patch 自己负责的属性
     # ==================================================================
     def _on_db_enabled_changed(self, _state):
+        # 启用数据库绑定只改变绑定状态；绝不在这里读取数据库。
         self._update_db_ui_state()
-        if self._chk_db_enabled.isChecked() and not self._db_metadata:
-            self._refresh_db_metadata()
         self._apply_db_patch({"enabled": self._chk_db_enabled.isChecked()})
 
     def _on_query_type_changed(self, _idx):
@@ -189,7 +305,6 @@ class DatabaseBindingPanel(StylePanel):
 
     def _on_optional_query_changed(self, _state):
         self._update_db_ui_state()
-        # 关闭关联表时只清空 joins；开启后使用当前填写的 join 配置。
         joins = self._current_joins() if self._chk_use_joins.isChecked() else []
         self._apply_db_patch({"joins": joins})
 
@@ -204,9 +319,7 @@ class DatabaseBindingPanel(StylePanel):
         if sender is self._txt_field:
             self._apply_db_patch({"field_name": self._txt_field.text().strip()})
             return
-        if sender is self._txt_date_ph:
-            self._apply_db_patch({"date_placeholder": self._txt_date_ph.text().strip()})
-            return
+        # 日期占位符 UI 已移除，不再由侧栏修改 date_placeholder。
         if sender is self._cmb_aggregate:
             self._apply_db_patch({"aggregate_func": self._cmb_aggregate.currentText()})
             return
@@ -221,7 +334,6 @@ class DatabaseBindingPanel(StylePanel):
             self._apply_db_patch({"joins": self._current_joins()})
             return
 
-        # 条件行的字段/运算符/值/连接符，以及删除条件操作，都只影响 filters。
         for fr in self._filter_rows:
             if sender in (
                 fr.get("field"), fr.get("field_combo"), fr.get("op"),
@@ -230,14 +342,12 @@ class DatabaseBindingPanel(StylePanel):
                 self._apply_db_patch({"filters": self._current_filters()})
                 return
 
-        # _remove_filter_row() 内部直接调用时 sender 可能是删除按钮或 None。
         self._apply_db_patch({"filters": self._current_filters()})
 
     def _on_manual_sql_changed(self):
         self._apply_db_patch({"custom_sql": self._txt_custom_sql.toPlainText().strip()})
 
     def _add_filter_row(self):
-        """补上连接符变化信号，使 AND/OR 修改也能增量应用。"""
         super()._add_filter_row()
         if self._filter_rows:
             fr = self._filter_rows[-1]
@@ -245,6 +355,9 @@ class DatabaseBindingPanel(StylePanel):
             if connector is not None and not connector.property("db_patch_connected"):
                 connector.currentTextChanged.connect(self._on_db_config_changed)
                 connector.setProperty("db_patch_connected", True)
+            field_combo = fr.get("field_combo")
+            if field_combo is not None:
+                self._configure_identifier_combo(field_combo)
 
     # ==================================================================
     # SQL 模式/互通
@@ -293,7 +406,6 @@ class DatabaseBindingPanel(StylePanel):
             self._update_sql_preview()
 
     def _generate_manual_sql(self):
-        """显式生成 SQL 时，只更新 custom_sql，不覆盖其他查询属性。"""
         qb = self._collect_db_binding()
         qb.sql_mode = "builder"
         sql = qb.build_sql()
@@ -304,7 +416,6 @@ class DatabaseBindingPanel(StylePanel):
             self._apply_db_patch({"custom_sql": sql})
 
     def _update_sql_preview(self):
-        """模板阶段显示时间占位符；运行时再由报表预览替换。"""
         qb = self._collect_db_binding()
         if not qb.enabled:
             self._lbl_sql_preview.setText("（未启用数据库绑定）")
@@ -324,9 +435,7 @@ class DatabaseBindingPanel(StylePanel):
             self._lbl_sql_validate.setStyleSheet("color:#D93025;")
         else:
             if qb.time_binding.enabled and "{start_time}" in sql:
-                self._lbl_sql_validate.setText(
-                    "✓ SQL 模板有效；{start_time}/{end_time} 将在生成报表时由预览时间替换"
-                )
+                self._lbl_sql_validate.setText("✓ SQL 模板有效；生成报表时自动应用时间范围")
             else:
                 self._lbl_sql_validate.setText("✓ SQL 语法正确")
             self._lbl_sql_validate.setStyleSheet("color:#188038;")
