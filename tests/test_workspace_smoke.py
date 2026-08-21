@@ -3,9 +3,11 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QGroupBox, QLabel
 
 from ui.workspace_window import WorkspaceWindow
+from ui.workspace_behaviors import PresetSaveDialog
 
 
 class WorkspaceSmokeTest(unittest.TestCase):
@@ -98,36 +100,41 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertTrue(hasattr(self.window._db_panel, "_chk_db_enabled"))
         self.assertFalse(hasattr(self.window._db_panel, "_nf_grp"))
 
-    def test_sidebars_can_collapse_to_hover_edge_and_expand_again(self):
+    def test_sidebars_collapse_to_zero_but_splitter_handles_remain(self):
         self.window._tabs.setCurrentIndex(1)
         self.app.processEvents()
 
-        self.assertFalse(self.window._left_side.collapsed)
-        self.window._left_side.set_collapsed(True)
-        self.app.processEvents()
-        self.assertTrue(self.window._left_side.collapsed)
-        self.assertFalse(self.window._style_group.isVisible())
-        self.assertLessEqual(self.window._left_side.maximumWidth(), 18)
+        splitter = self.window._main_splitter
+        self.assertEqual(splitter.handleWidth(), 10)
+        self.assertFalse(splitter.side_collapsed("left"))
+        self.assertFalse(splitter.side_collapsed("right"))
 
-        self.window._left_side.set_collapsed(False)
+        splitter.set_side_collapsed("left", True)
         self.app.processEvents()
-        self.assertFalse(self.window._left_side.collapsed)
-        self.assertTrue(self.window._style_group.isVisible())
+        self.assertTrue(splitter.side_collapsed("left"))
+        self.assertLessEqual(splitter.sizes()[0], 1)
+        self.assertTrue(splitter.handle(1).isVisible())
 
-        self.assertFalse(self.window._right_side.collapsed)
-        self.window._right_side.set_collapsed(True)
+        splitter.set_side_collapsed("left", False)
         self.app.processEvents()
-        self.assertTrue(self.window._right_side.collapsed)
-        self.assertFalse(self.window._db_group.isVisible())
-        self.window._right_side.set_collapsed(False)
+        self.assertFalse(splitter.side_collapsed("left"))
+        self.assertGreater(splitter.sizes()[0], 1)
+
+        splitter.set_side_collapsed("right", True)
         self.app.processEvents()
-        self.assertFalse(self.window._right_side.collapsed)
+        self.assertTrue(splitter.side_collapsed("right"))
+        self.assertLessEqual(splitter.sizes()[2], 1)
+        self.assertTrue(splitter.handle(2).isVisible())
+
+        splitter.set_side_collapsed("right", False)
+        self.app.processEvents()
+        self.assertFalse(splitter.side_collapsed("right"))
+        self.assertGreater(splitter.sizes()[2], 1)
 
     def test_side_panel_headers_match_requested_hierarchy(self):
         self.assertEqual(self.window._style_group.title(), "字体 / 样式 / 边框")
         self.assertEqual(self.window._db_group.title(), "数据库绑定与时间条件")
 
-        # 数据库栏不再显示“当前选中范围”。
         visible_group_titles = [
             g.title() for g in self.window._db_panel.findChildren(QGroupBox)
             if not g.isHidden()
@@ -148,6 +155,21 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertTrue(behavior.is_dirty())
         behavior.mark_clean()
         self.assertFalse(behavior.is_dirty())
+
+    def test_preset_dialog_uses_name_field_as_only_save_decision(self):
+        dlg = PresetSaveDialog(self.window._editor._template, self.window)
+        try:
+            self.assertEqual(dlg._name.placeholderText(), "请输入预设名称")
+            self.assertFalse(hasattr(dlg, "_replace_btn"))
+            self.assertGreater(dlg._list.count(), 0)
+
+            item = dlg._list.item(0)
+            name, _kind = item.data(Qt.ItemDataRole.UserRole)
+            dlg._list.setCurrentItem(item)
+            self.app.processEvents()
+            self.assertEqual(dlg._name.text(), name)
+        finally:
+            dlg.close()
 
 
 if __name__ == "__main__":
