@@ -19,12 +19,11 @@ from ui.preview_table import PreviewTable
 
 
 class PresetSaveDialog(QDialog):
-    """保存当前模板为预设，同时浏览已有预设并支持覆盖自定义预设。"""
+    """通过“预设名称”唯一决定新建还是覆盖，并提供已有预设预览。"""
 
     def __init__(self, template: TemplateModel, parent=None):
         super().__init__(parent)
         self._source_template = template
-        self._selected_name = ""
         self._result_name = ""
         self.setWindowTitle("保存为预设模板")
         self.resize(980, 620)
@@ -40,12 +39,6 @@ class PresetSaveDialog(QDialog):
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
 
-        hint = QLabel(
-            "可以从左侧查看已有预设并替换自定义预设；也可以在下方输入新名称保存。"
-        )
-        hint.setStyleSheet("color:#5F6368;")
-        root.addWidget(hint)
-
         split = QSplitter(Qt.Orientation.Horizontal)
 
         left = QWidget()
@@ -56,10 +49,6 @@ class PresetSaveDialog(QDialog):
         self._list.setMinimumWidth(230)
         self._list.currentItemChanged.connect(self._on_selected)
         ll.addWidget(self._list, 1)
-        self._replace_btn = QPushButton("替换选中的自定义预设")
-        self._replace_btn.setEnabled(False)
-        self._replace_btn.clicked.connect(self._replace_selected)
-        ll.addWidget(self._replace_btn)
         split.addWidget(left)
 
         right = QWidget()
@@ -77,9 +66,9 @@ class PresetSaveDialog(QDialog):
         root.addWidget(split, 1)
 
         name_row = QHBoxLayout()
-        name_row.addWidget(QLabel("新预设名称:"))
+        name_row.addWidget(QLabel("预设名称:"))
         self._name = QLineEdit()
-        self._name.setPlaceholderText("输入名称；如果与已有自定义预设重名会询问是否替换")
+        self._name.setPlaceholderText("请输入预设名称")
         name_row.addWidget(self._name, 1)
         self._save_btn = QPushButton("保存预设")
         self._save_btn.clicked.connect(self._save_by_name)
@@ -94,38 +83,35 @@ class PresetSaveDialog(QDialog):
         root.addLayout(cancel_row)
 
     def _reload_presets(self):
-        current = self._selected_name
         self._list.clear()
         for name in BUILTIN_TEMPLATES:
             item = QListWidgetItem(f"[内置] {name}")
             item.setData(Qt.ItemDataRole.UserRole, (name, "builtin"))
             self._list.addItem(item)
-        custom = get_custom_presets()
-        for name in custom:
+        for name in get_custom_presets():
             item = QListWidgetItem(f"[自定义] {name}")
             item.setData(Qt.ItemDataRole.UserRole, (name, "custom"))
             self._list.addItem(item)
-            if name == current:
-                self._list.setCurrentItem(item)
-        if self._list.count() and self._list.currentItem() is None:
-            self._list.setCurrentRow(0)
 
     def _on_selected(self, current, _previous):
         if current is None:
-            self._replace_btn.setEnabled(False)
             return
         name, kind = current.data(Qt.ItemDataRole.UserRole)
-        self._selected_name = name
-        self._replace_btn.setEnabled(kind == "custom")
-        self._replace_btn.setToolTip(
-            "" if kind == "custom" else "内置预设来自程序代码，不能直接覆盖"
-        )
+
+        # 点击已有预设只做两件事：把名字填入输入框，并预览该预设。
+        # 最终是否覆盖完全由“预设名称”输入框 + 保存按钮决定。
+        self._name.setText(name)
+        self._name.selectAll()
         try:
-            model = load_template_by_name(name)
+            if kind == "builtin":
+                model = BUILTIN_TEMPLATES[name]()
+                label = "内置预设（只读）"
+            else:
+                model = load_template_by_name(name)
+                label = "自定义预设"
             self._preview_model = TemplateModel.from_dict(model.to_dict())
             self._preview.set_template(self._preview_model)
             self._preview.set_query_results({})
-            label = "自定义预设" if kind == "custom" else "内置预设（只读）"
             self._preview_title.setText(f"{name} — {label}")
         except Exception as exc:
             self._preview_title.setText(f"无法预览：{exc}")
@@ -133,8 +119,8 @@ class PresetSaveDialog(QDialog):
     def _confirm_replace(self, name: str) -> bool:
         reply = QMessageBox.question(
             self,
-            "替换预设模板",
-            f"预设模板“{name}”已经存在。\n\n是否用当前模板替换它？",
+            "覆盖预设模板",
+            f"预设模板“{name}”已经存在。\n\n是否用当前模板覆盖它？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -145,29 +131,22 @@ class PresetSaveDialog(QDialog):
         self._result_name = name
         self.accept()
 
-    def _replace_selected(self):
-        item = self._list.currentItem()
-        if item is None:
-            return
-        name, kind = item.data(Qt.ItemDataRole.UserRole)
-        if kind != "custom":
-            QMessageBox.information(self, "不能替换", "内置预设不能直接覆盖，请输入新名称保存。")
-            return
-        if self._confirm_replace(name):
-            self._write(name)
-
     def _save_by_name(self):
         name = self._name.text().strip()
         if not name:
-            QMessageBox.information(self, "请输入名称", "请输入预设模板名称。")
+            QMessageBox.information(self, "请输入名称", "请输入预设名称。")
             self._name.setFocus()
             return
+
+        # 内置预设由程序代码提供，不能写回；自定义预设则严格按名称判断覆盖。
         if name in BUILTIN_TEMPLATES:
             QMessageBox.warning(
-                self, "名称冲突",
-                "该名称与内置预设重名。内置预设不能覆盖，请换一个名称。",
+                self,
+                "不能覆盖内置预设",
+                "该名称属于内置预设，不能直接覆盖。请修改预设名称后保存。",
             )
             return
+
         if name in get_custom_presets() and not self._confirm_replace(name):
             return
         self._write(name)
@@ -233,20 +212,15 @@ class WorkspaceFileBehavior:
         action.triggered.connect(callback)
 
     def _install(self):
-        # 保存动作：成功后把当前模板记录为干净基线。
         self._replace_trigger(self._find_action("保存模板"), self._save)
         self._replace_trigger(self._find_action("另存模板"), self._save_as)
-
-        # 预设保存升级为“已有预设预览 + 替换 + 新名称保存”。
         self._replace_trigger(self._find_action("将当前模板保存为预设"), self._save_preset)
 
-        # 会替换当前工作模板的动作先做未保存检查。
         self._replace_trigger(self._find_action("新建模板"), self._new)
         self._replace_trigger(self._find_action("打开模板"), self._open)
         self._replace_trigger(self._find_action("导入 Excel"), self._import_excel)
         self._replace_trigger(self._find_action("恢复默认模板"), self._restore_default)
 
-        # 加载预设菜单是动态重建的，因此直接重建为受保护版本。
         self.rebuild_guarded_preset_menu()
 
     def rebuild_guarded_preset_menu(self):
@@ -295,7 +269,6 @@ class WorkspaceFileBehavior:
         if self._saved_file_matches_current():
             self.mark_clean()
             return True
-        # 保存对话框被取消或保存失败时，不允许继续覆盖当前模板。
         return False
 
     def _after_replaced(self):
