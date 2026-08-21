@@ -3,7 +3,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QLabel
 
 from models.template_model import TemplateModel, CellData
 from models.db_config import QueryBinding, QueryType
@@ -103,6 +104,61 @@ class EditorSidePanelTest(unittest.TestCase):
         self.assertTrue(qb2.enabled)
         self.assertEqual((qb1.table_name, qb1.field_name), ("a", "fa"))
         self.assertEqual((qb2.table_name, qb2.field_name), ("b", "fb"))
+
+    def test_metadata_is_only_requested_by_explicit_refresh(self):
+        calls = []
+
+        def provider(key):
+            calls.append(key)
+            return {
+                "production_daily": ["record_time", "output", "workshop"],
+                "equipment": ["id", "name"],
+            }
+
+        panel = DatabaseBindingPanel(self.template, metadata_provider=provider)
+        panel.show()
+        self.app.processEvents()
+        try:
+            panel._current_row = 0
+            panel._current_col = 0
+            panel._chk_db_enabled.setChecked(True)
+            self.app.processEvents()
+            self.assertEqual(calls, [])
+
+            self.assertTrue(panel.refresh_database_metadata())
+            self.assertEqual(calls, ["default"])
+            self.assertIn("production_daily", [
+                panel._cmb_table.itemText(i) for i in range(panel._cmb_table.count())
+            ])
+            self.assertIn("数据库已刷新", panel._lbl_metadata_state.text())
+        finally:
+            panel.close()
+
+    def test_all_database_identifier_inputs_are_searchable_dropdowns(self):
+        combos = [
+            self.db_panel._cmb_table,
+            self.db_panel._cmb_field,
+            self.db_panel._cmb_join_table,
+            self.db_panel._cmb_join_left,
+            self.db_panel._cmb_join_right,
+            self.db_panel._filter_rows[0]["field_combo"],
+        ]
+        for combo in combos:
+            self.assertTrue(combo.isEditable())
+            self.assertIsNotNone(combo.completer())
+            self.assertEqual(combo.completer().filterMode(), Qt.MatchFlag.MatchContains)
+            self.assertTrue(combo.property("identifier_combo_ready"))
+
+    def test_date_placeholder_and_side_refresh_button_are_hidden(self):
+        self.db_panel.show()
+        self.app.processEvents()
+        self.assertTrue(self.db_panel._txt_date_ph.isHidden())
+        self.assertTrue(self.db_panel._btn_refresh_metadata.isHidden())
+        labels = self.db_panel.findChildren(QLabel)
+        date_labels = [label for label in labels if label.text().startswith("日期占位符")]
+        self.assertTrue(date_labels)
+        self.assertTrue(all(label.isHidden() for label in date_labels))
+        self.assertEqual(self.db_panel._lbl_metadata_state.text(), "未读取到数据库")
 
 
 if __name__ == "__main__":
