@@ -1,30 +1,31 @@
-"""模板编辑页左右侧栏：可拖拽分隔线 + 悬停整条边缘收起/展开。"""
+"""模板编辑页左右侧栏：拖拽调宽与收起/展开使用独立交互区域。"""
 
-from PyQt6.QtCore import Qt, QPoint
+from PyQt6.QtCore import Qt, QEvent
 from PyQt6.QtGui import QColor, QPainter, QPen
-from PyQt6.QtWidgets import QSplitter, QSplitterHandle
+from PyQt6.QtWidgets import QWidget, QSplitter
 
 
-class _SidebarSplitterHandle(QSplitterHandle):
-    """贴着侧栏的分隔线。
+class _SidebarToggleStrip(QWidget):
+    """独立于 QSplitterHandle 的侧栏收起/展开热区。
 
-    平时保持透明，只承担正常的拖拽调宽；鼠标进入分隔线附近时，整条竖向
-    热区才显示出来，并在高度中点绘制一个小箭头。轻点箭头区域收起/展开，
-    拖动则仍按普通 QSplitterHandle 调整侧栏宽度。
+    它位于拖拽分隔线的“表格一侧”，不覆盖分隔线本身：
+    - 分隔线只负责拖动调宽；
+    - 本控件只负责点击收起/展开；
+    - 平时完全透明，鼠标进入后才显示细长竖条和中间箭头。
     """
 
-    def __init__(self, orientation, parent):
-        super().__init__(orientation, parent)
-        self._hovered = False
-        self._press_pos = QPoint()
-        self._side_name = ""
-        self.setMouseTracking(True)
-        self.setCursor(Qt.CursorShape.SplitHCursor)
+    HOT_WIDTH = 14
 
-    def configure(self, side_name: str):
+    def __init__(self, splitter, side_name: str):
+        super().__init__(splitter)
+        self._splitter = splitter
         self._side_name = side_name
-        self.setToolTip("拖动调整侧栏宽度；单击收起/展开")
-        self.update()
+        self._hovered = False
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("点击收起/展开侧栏")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.raise_()
 
     def enterEvent(self, event):
         self._hovered = True
@@ -37,37 +38,42 @@ class _SidebarSplitterHandle(QSplitterHandle):
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
-        self._press_pos = event.position().toPoint()
+        # 这里只响应点击，不把事件传给 QSplitterHandle，因此不会触发拖拽。
+        if event.button() == Qt.MouseButton.LeftButton:
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
-        moved = (event.position().toPoint() - self._press_pos).manhattanLength()
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self._splitter.toggle_side(self._side_name)
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
-        if moved <= 3 and self._side_name:
-            self.splitter().toggle_side(self._side_name)
 
     def paintEvent(self, event):
-        # 平时不画任何常驻按钮/边条；只有鼠标靠近分隔线时才浮出整条控制带。
         if not self._hovered:
             return
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.fillRect(self.rect(), QColor(237, 242, 248, 225))
 
+        # 热区可以稍宽以便鼠标命中，但视觉上只画一条很细的长竖条。
+        painter.fillRect(self.rect(), QColor(238, 243, 249, 155))
         x = self.width() // 2
-        painter.setPen(QPen(QColor("#9AA4B2"), 1))
-        painter.drawLine(x, 0, x, self.height())
+        painter.setPen(QPen(QColor("#A4AFBC"), 1))
+        painter.drawLine(x, 4, x, max(4, self.height() - 4))
 
-        direction = self.splitter().arrow_direction(self._side_name)
+        direction = self._splitter.arrow_direction(self._side_name)
         cy = self.height() // 2
-        arrow_color = QColor("#1A73E8")
-        painter.setPen(QPen(arrow_color, 1.8, Qt.PenStyle.SolidLine,
-                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.setPen(QPen(
+            QColor("#1A73E8"), 1.8, Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin,
+        ))
 
-        # 在中间画紧凑双折线箭头，效果接近用户示例中的蓝色箭头标记。
-        span = max(2, min(4, self.width() // 3))
-        for offset in (-3, 3):
+        span = 3
+        # 画成类似示例中的双折线箭头，位于整条控制带中部。
+        for offset in (-4, 4):
             yy = cy + offset
             if direction == "left":
                 painter.drawLine(x + span, yy - span, x - span, yy)
@@ -80,18 +86,20 @@ class _SidebarSplitterHandle(QSplitterHandle):
 class CollapsibleSplitter(QSplitter):
     """三栏编辑区的 QSplitter。
 
-    左右侧栏收起时大小真正变为 0，不留下常驻侧栏容器；只有贴着边界的
-    QSplitterHandle 还存在，用作拖拽和悬停展开入口。
+    QSplitter 自己的 handle 只负责拖动改变宽度；每个侧栏另有一条独立的
+    _SidebarToggleStrip 负责点击收起/展开。两套区域相邻但绝不共用事件。
     """
 
     def __init__(self, parent=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
-        self.setHandleWidth(10)
+        # 拖拽分隔线本身保持窄，直接贴在侧栏边缘。
+        self.setHandleWidth(5)
         self.setChildrenCollapsible(True)
         self._side_specs = {}
+        self._toggle_strips = {}
 
-    def createHandle(self):
-        return _SidebarSplitterHandle(self.orientation(), self)
+        # resize/move 时重新定位覆盖在表格侧的 toggle strip。
+        self.installEventFilter(self)
 
     def configure_side(
         self,
@@ -111,9 +119,57 @@ class CollapsibleSplitter(QSplitter):
             "minimum_width": widget.minimumWidth(),
         }
         self.setCollapsible(panel_index, True)
-        handle = self.handle(handle_index)
-        if isinstance(handle, _SidebarSplitterHandle):
-            handle.configure(side_name)
+
+        strip = _SidebarToggleStrip(self, side_name)
+        self._toggle_strips[side_name] = strip
+        strip.show()
+        self._position_toggle_strips()
+
+    def eventFilter(self, watched, event):
+        if watched is self and event.type() in (
+            QEvent.Type.Resize,
+            QEvent.Type.Move,
+            QEvent.Type.LayoutRequest,
+            QEvent.Type.Show,
+        ):
+            self._position_toggle_strips()
+        return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_toggle_strips()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._position_toggle_strips()
+
+    def _position_toggle_strips(self):
+        """把隐藏/展示热区放在拖拽 handle 的表格一侧。
+
+        左侧： [侧栏][拖拽 handle][toggle strip][表格]
+        右侧： [表格][toggle strip][拖拽 handle][侧栏]
+        """
+        if not self._side_specs:
+            return
+
+        height = max(0, self.height())
+        width = _SidebarToggleStrip.HOT_WIDTH
+        for side_name, spec in self._side_specs.items():
+            strip = self._toggle_strips.get(side_name)
+            handle = self.handle(spec["handle_index"])
+            if strip is None or handle is None:
+                continue
+
+            hg = handle.geometry()
+            if side_name == "left":
+                x = hg.right() + 1
+            else:
+                x = hg.left() - width
+
+            # 防止极端窗口尺寸下越界。
+            x = max(0, min(x, max(0, self.width() - width)))
+            strip.setGeometry(x, 0, width, height)
+            strip.raise_()
 
     def side_collapsed(self, side_name: str) -> bool:
         spec = self._side_specs[side_name]
@@ -121,7 +177,6 @@ class CollapsibleSplitter(QSplitter):
         return sizes[spec["panel_index"]] <= 1
 
     def arrow_direction(self, side_name: str) -> str:
-        """返回当前点击箭头应指向的方向。"""
         collapsed = self.side_collapsed(side_name)
         if side_name == "left":
             return "right" if collapsed else "left"
@@ -142,7 +197,6 @@ class CollapsibleSplitter(QSplitter):
             if current <= 1:
                 return
             spec["last_width"] = current
-            # 临时允许大小降到 0；不 hide widget，否则对应 splitter handle 也会消失。
             widget.setMinimumWidth(0)
             sizes[panel_index] = 0
             sizes[center_index] += current
@@ -151,14 +205,16 @@ class CollapsibleSplitter(QSplitter):
             if current > 1:
                 return
             widget.setMinimumWidth(spec["minimum_width"])
-            target = max(spec["last_width"], spec["expanded_width"], spec["minimum_width"])
+            target = max(
+                spec["last_width"], spec["expanded_width"], spec["minimum_width"]
+            )
             available = max(0, sizes[center_index] - 260)
             restore = min(target, available) if available else target
             sizes[panel_index] = restore
             sizes[center_index] = max(0, sizes[center_index] - restore)
             self.setSizes(sizes)
 
-        for data in self._side_specs.values():
-            handle = self.handle(data["handle_index"])
-            if handle is not None:
-                handle.update()
+        self._position_toggle_strips()
+        strip = self._toggle_strips.get(side_name)
+        if strip is not None:
+            strip.update()
