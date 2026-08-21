@@ -12,7 +12,7 @@ from ui.report_preview_page import ReportPreviewPage
 from ui.time_binding_panel import TimeBindingPanel
 from ui.editor_side_panels import StyleOnlyPanel, DatabaseBindingPanel
 from ui.editor_history import install_editor_history
-from ui.collapsible_side_panel import CollapsibleSideContainer
+from ui.collapsible_side_panel import CollapsibleSplitter
 from ui.workspace_behaviors import WorkspaceFileBehavior
 
 
@@ -57,7 +57,7 @@ class WorkspaceWindow(QMainWindow):
         preview_layout.addWidget(self._report_preview, 1)
 
         # --------------------------------------------------------------
-        # 模板编辑页：编辑工具栏 + 可收起左右侧栏 + 表格
+        # 模板编辑页：编辑工具栏 + 可完全收起左右侧栏 + 表格
         # --------------------------------------------------------------
         template_page = QWidget()
         template_layout = QVBoxLayout(template_page)
@@ -67,20 +67,17 @@ class WorkspaceWindow(QMainWindow):
         self._template_toolbar = self._build_template_toolbar(template_page)
         template_layout.addWidget(self._template_toolbar)
 
-        main_splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_splitter.setChildrenCollapsible(False)
+        # 使用自定义 QSplitter：分隔线本身就是拖拽条，也是悬停收起/展开入口。
+        # 因此不会再额外占用 18px 的常驻侧栏容器。
+        main_splitter = CollapsibleSplitter()
 
-        # 左侧标题放在最上方，当前选区仍保留在标题下面。
         self._style_group = QGroupBox("字体 / 样式 / 边框")
         style_group_layout = QVBoxLayout(self._style_group)
         style_group_layout.setContentsMargins(4, 6, 4, 4)
         style_group_layout.addWidget(self._style_panel)
         self._style_group.setMinimumWidth(295)
         self._style_group.setMaximumWidth(370)
-        self._left_side = CollapsibleSideContainer(
-            self._style_group, "left", expanded_width=320
-        )
-        main_splitter.addWidget(self._left_side)
+        main_splitter.addWidget(self._style_group)
 
         main_splitter.addWidget(self._editor)
 
@@ -89,7 +86,7 @@ class WorkspaceWindow(QMainWindow):
         right.setMaximumWidth(550)
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(6)
+        right_layout.setSpacing(0)
 
         self._db_group = QGroupBox("数据库绑定与时间条件")
         db_layout = QVBoxLayout(self._db_group)
@@ -102,17 +99,21 @@ class WorkspaceWindow(QMainWindow):
         vertical.setStretchFactor(1, 0)
         db_layout.addWidget(vertical)
         right_layout.addWidget(self._db_group)
+        main_splitter.addWidget(right)
 
-        self._right_side = CollapsibleSideContainer(
-            right, "right", expanded_width=450
-        )
-        main_splitter.addWidget(self._right_side)
-        main_splitter.setSizes([330, 1000, 470])
+        main_splitter.setSizes([320, 1030, 450])
         main_splitter.setStretchFactor(0, 0)
         main_splitter.setStretchFactor(1, 1)
         main_splitter.setStretchFactor(2, 0)
+        main_splitter.configure_side(
+            "left", panel_index=0, handle_index=1, expanded_width=320
+        )
+        main_splitter.configure_side(
+            "right", panel_index=2, handle_index=2, expanded_width=450
+        )
         template_layout.addWidget(main_splitter, 1)
         self._main_splitter = main_splitter
+        self._right_panel_container = right
 
         # --------------------------------------------------------------
         # 页面层：报表预览 / 模板编辑
