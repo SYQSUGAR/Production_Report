@@ -50,7 +50,6 @@ class WorkspaceWindow(QMainWindow):
         preview_layout.setSpacing(0)
         preview_layout.addWidget(self._report_preview, 1)
 
-        # 模板编辑页：最外侧只负责隐藏/显示，中间两条 splitter handle 只负责调宽。
         template_page = QWidget()
         template_layout = QVBoxLayout(template_page)
         template_layout.setContentsMargins(0, 0, 0, 0)
@@ -154,9 +153,6 @@ class WorkspaceWindow(QMainWindow):
             if toolbar.windowTitle() == "主工具栏" and toolbar is not self._template_toolbar:
                 toolbar.hide()
 
-    # ==================================================================
-    # 侧栏标题与分区视觉
-    # ==================================================================
     def _flatten_toolbox_page(self, panel):
         toolbox = getattr(panel, "_toolbox", None)
         if toolbox is None or toolbox.count() == 0:
@@ -197,9 +193,6 @@ class WorkspaceWindow(QMainWindow):
                 )
                 break
 
-    # ==================================================================
-    # 全局第一排：文件 / 数据库
-    # ==================================================================
     def _source_global_menus(self):
         result = []
         for action in self._editor.menuBar().actions():
@@ -233,21 +226,16 @@ class WorkspaceWindow(QMainWindow):
         return bar
 
     def _refresh_database_metadata(self):
-        """显式刷新数据库结构；这是模板编辑阶段唯一的元数据联网入口。"""
         ok = self._db_panel.refresh_database_metadata()
         self._sync_time_field_choices()
         self._editor._status_label.setText("数据库已刷新" if ok else "未读取到数据库")
 
     def _sync_time_field_choices(self, *_args):
-        """把当前数据表的缓存字段同步给时间字段下拉框，不访问数据库。"""
         table_text = self._db_panel._cmb_table.currentText().strip()
         table = table_text.split()[0] if table_text else ""
         fields = self._db_panel._db_metadata.get(table, [])
         self._time_panel.set_field_choices(fields)
 
-    # ==================================================================
-    # 模板页第二排：仅模板编辑使用的工具栏
-    # ==================================================================
     def _build_template_toolbar(self, parent: QWidget) -> QToolBar:
         source_toolbar = None
         for toolbar in self._editor.findChildren(QToolBar):
@@ -264,9 +252,6 @@ class WorkspaceWindow(QMainWindow):
                 toolbar.addAction(action)
         return toolbar
 
-    # ==================================================================
-    # 全局动作后统一同步两个页面
-    # ==================================================================
     def _iter_leaf_actions(self, menu: QMenu):
         for action in menu.actions():
             submenu = action.menu()
@@ -321,6 +306,7 @@ class WorkspaceWindow(QMainWindow):
         self._time_panel.set_selected_cells(cells)
         self._style_panel.set_current_selection(scope, row, col)
         self._db_panel.set_current_selection(scope, row, col)
+        self._sync_time_field_choices()
         self._time_panel.set_selection(row, col, scope)
         self._report_preview._scan_time_requirements()
 
@@ -338,6 +324,7 @@ class WorkspaceWindow(QMainWindow):
         self._sync_side_panel_templates()
         self._style_panel.set_current_selection(scope, row, col)
         self._db_panel.set_current_selection(scope, row, col)
+        self._sync_time_field_choices()
         self._time_panel.set_selection(row, col, scope)
 
     def _protect_time_binding_from_db_panel_refresh(self, panel):
