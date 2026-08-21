@@ -1,4 +1,4 @@
-"""应用工作区：报表预览 + 模板编辑双页面。"""
+"""应用工作区：全局文件/数据库 + 报表预览/模板编辑。"""
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
@@ -15,10 +15,10 @@ from ui.editor_history import install_editor_history
 
 
 class WorkspaceWindow(QMainWindow):
-    """一级页签为“报表预览 / 模板编辑”。
+    """工作区层级：全局“文件/数据库” > “报表预览/模板编辑”。
 
-    “文件 / 数据库”属于整个报表工作区，在两个页签中都显示；
-    撤销、复制、粘贴、合并、行列操作等只属于模板编辑页。
+    文件与数据库决定当前工作区使用的模板和数据源，因此同时影响两个页面；
+    撤销、复制、粘贴、合并、行列操作等编辑命令只属于模板编辑页。
     """
 
     def __init__(self):
@@ -26,8 +26,7 @@ class WorkspaceWindow(QMainWindow):
         self.setWindowTitle("生产报表模板编辑与预览")
         self.resize(1760, 920)
 
-        # MainWindow 继续作为模板编辑核心，保留原来的命令、公式栏、表格和状态逻辑。
-        # WorkspaceWindow 只重新组织“哪些命令属于全局、哪些只属于模板编辑”。
+        # MainWindow 继续作为模板编辑核心和命令提供者。
         self._editor = MainWindow()
         self._editor._style_panel.hide()
         self._install_template_query_formatter()
@@ -44,37 +43,24 @@ class WorkspaceWindow(QMainWindow):
         )
         self._protect_time_binding_from_db_panel_refresh(self._db_panel)
 
-        # 报表预览页先建立，后续全局“文件/数据库”动作可以随时刷新它。
         self._report_preview = ReportPreviewPage(self._editor)
 
         # --------------------------------------------------------------
-        # 报表预览页
-        # 第一排：文件 / 数据库（全局）
-        # 下面：只读报表预览
+        # 报表预览页：这里只放预览自身内容，不再重复放“文件/数据库”。
         # --------------------------------------------------------------
         preview_page = QWidget()
         preview_layout = QVBoxLayout(preview_page)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(0)
-        self._preview_menu_bar = self._build_global_menu_bar(preview_page, "previewGlobalMenuBar")
-        preview_layout.addWidget(self._preview_menu_bar)
         preview_layout.addWidget(self._report_preview, 1)
 
         # --------------------------------------------------------------
-        # 模板编辑页
-        # 第一排：文件 / 数据库（全局）
-        # 第二排：撤销/恢复/复制/粘贴/合并/行列等模板编辑工具
-        # 下面：样式 | 模板表格 | 数据库绑定+时间
+        # 模板编辑页：第二排编辑工具栏 + 三栏编辑区。
         # --------------------------------------------------------------
         template_page = QWidget()
         template_layout = QVBoxLayout(template_page)
         template_layout.setContentsMargins(0, 0, 0, 0)
         template_layout.setSpacing(0)
-
-        self._template_menu_bar = self._build_global_menu_bar(
-            template_page, "templateGlobalMenuBar"
-        )
-        template_layout.addWidget(self._template_menu_bar)
 
         self._template_toolbar = self._build_template_toolbar(template_page)
         template_layout.addWidget(self._template_toolbar)
@@ -107,6 +93,28 @@ class WorkspaceWindow(QMainWindow):
         main_splitter.setStretchFactor(2, 0)
         template_layout.addWidget(main_splitter, 1)
 
+        # --------------------------------------------------------------
+        # 页面层：报表预览 / 模板编辑。
+        # --------------------------------------------------------------
+        self._tabs = QTabWidget()
+        self._tabs.addTab(preview_page, "报表预览")
+        self._tabs.addTab(template_page, "模板编辑")
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+
+        # --------------------------------------------------------------
+        # 全局层：文件 / 数据库。
+        # 视觉和逻辑层级都位于页面页签之上，只保留一份。
+        # --------------------------------------------------------------
+        workspace = QWidget()
+        workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_layout.setSpacing(0)
+
+        self._global_menu_bar = self._build_global_menu_bar(workspace)
+        workspace_layout.addWidget(self._global_menu_bar)
+        workspace_layout.addWidget(self._tabs, 1)
+        self.setCentralWidget(workspace)
+
         # 工作区信号
         self._editor._preview.selection_changed.connect(self._on_editor_selection)
         self._editor._preview.cells_selected.connect(self._on_editor_cells_selected)
@@ -121,26 +129,21 @@ class WorkspaceWindow(QMainWindow):
 
         install_editor_history(self._editor, after_change=self._refresh_side_panels)
 
-        # 文件/数据库菜单动作在任何页签执行后，都重新同步当前模板和预览。
+        # 全局文件/数据库动作执行后，统一刷新两个页面使用的工作区状态。
         self._wire_global_menu_refresh()
 
-        # 一级页签顺序：先预览，再模板编辑。
-        self._tabs = QTabWidget()
-        self._tabs.addTab(preview_page, "报表预览")
-        self._tabs.addTab(template_page, "模板编辑")
-        self._tabs.currentChanged.connect(self._on_tab_changed)
-        self.setCentralWidget(self._tabs)
+        # 默认先进入报表预览。
         self._tabs.setCurrentIndex(0)
         self._report_preview.sync_template()
 
-        # MainWindow 自己的菜单/工具栏只是动作来源，不再在中间编辑器里显示。
+        # MainWindow 自带菜单/工具栏仅作为 QAction 来源，不再重复显示。
         self._editor.menuBar().hide()
         for toolbar in self._editor.findChildren(QToolBar):
             if toolbar.windowTitle() == "主工具栏" and toolbar is not self._template_toolbar:
                 toolbar.hide()
 
     # ==================================================================
-    # 第一排：全局“文件 / 数据库”菜单
+    # 全局第一排：文件 / 数据库
     # ==================================================================
     def _source_global_menus(self):
         """返回 MainWindow 中需要提升为全局能力的菜单；显式排除“编辑”。"""
@@ -154,14 +157,10 @@ class WorkspaceWindow(QMainWindow):
                 result.append(menu)
         return result
 
-    def _build_global_menu_bar(self, parent: QWidget, object_name: str) -> QMenuBar:
-        """构造只包含“文件 / 数据库”的第一排菜单。
-
-        子 QAction 直接复用 MainWindow 原动作，因此文件打开、预设、导入 Excel、
-        数据库配置/测试/刷新等行为与原程序完全一致；“编辑”不再重复显示。
-        """
+    def _build_global_menu_bar(self, parent: QWidget) -> QMenuBar:
+        """构造工作区唯一的“文件 / 数据库”菜单栏。"""
         bar = QMenuBar(parent)
-        bar.setObjectName(object_name)
+        bar.setObjectName("globalWorkspaceMenuBar")
         bar.setNativeMenuBar(False)
 
         for source_menu in self._source_global_menus():
@@ -172,7 +171,7 @@ class WorkspaceWindow(QMainWindow):
         return bar
 
     # ==================================================================
-    # 第二排：仅模板编辑使用的工具栏
+    # 模板页第二排：仅模板编辑使用的工具栏
     # ==================================================================
     def _build_template_toolbar(self, parent: QWidget) -> QToolBar:
         """按 MainWindow 原工具栏顺序复制模板编辑动作。"""
@@ -192,7 +191,7 @@ class WorkspaceWindow(QMainWindow):
         return toolbar
 
     # ==================================================================
-    # 全局动作后同步预览
+    # 全局动作后统一同步两个页面
     # ==================================================================
     def _iter_leaf_actions(self, menu: QMenu):
         for action in menu.actions():
@@ -203,22 +202,30 @@ class WorkspaceWindow(QMainWindow):
                 yield action
 
     def _wire_global_menu_refresh(self):
-        """文件/数据库操作完成后刷新预览；同时给动态重建的预设动作补连接。"""
+        """文件/数据库动作完成后统一刷新工作区；兼容动态重建的预设菜单。"""
         for menu in self._source_global_menus():
             for action in self._iter_leaf_actions(menu):
-                if action.property("workspace_preview_refresh_connected"):
+                if action.property("workspace_global_refresh_connected"):
                     continue
                 action.triggered.connect(self._schedule_global_refresh)
-                action.setProperty("workspace_preview_refresh_connected", True)
+                action.setProperty("workspace_global_refresh_connected", True)
 
     def _schedule_global_refresh(self, *_args):
-        # 原 QAction 的槽先完成（文件对话框/数据库对话框也先结束），
-        # 再在事件循环下一拍读取最终 editor._template。
+        # 让原 QAction 的文件/数据库槽先完整执行，再读取最终状态。
         QTimer.singleShot(0, self._refresh_after_global_action)
 
     def _refresh_after_global_action(self):
+        # 文件菜单中的“预设模板”可能被动态重建，先补齐新 QAction 的连接。
         self._wire_global_menu_refresh()
+
+        # 模板编辑侧与当前 editor._template 保持同一真值。
         self._sync_side_panel_templates()
+
+        # 数据库配置可能已经变化，丢弃旧元数据缓存；下次需要时重新读取。
+        self._db_panel._db_metadata = {}
+
+        # 报表预览重新克隆当前模板，因此静态数据、查询绑定、数据库配置、
+        # 时间规则、样式、合并及尺寸等都会同步到预览页。
         self._report_preview.sync_template()
 
     def _install_template_query_formatter(self):
@@ -289,7 +296,6 @@ class WorkspaceWindow(QMainWindow):
 
     def _on_tab_changed(self, index: int):
         self._sync_side_panel_templates()
-        # 0 = 报表预览；每次进入预览都重新读取当前模板。
         if index == 0:
             self._report_preview.sync_template()
 
