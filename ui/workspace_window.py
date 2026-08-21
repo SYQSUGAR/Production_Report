@@ -58,8 +58,8 @@ class WorkspaceWindow(QMainWindow):
 
         # --------------------------------------------------------------
         # 模板编辑页：编辑工具栏 + 左右侧栏 + 表格
-        # 左侧字体栏可拖动调宽；右侧数据库栏固定宽度。
-        # 两侧隐藏/展开均使用独立悬停控制带，不与拖拽区域共用。
+        # 左侧字体栏从右边界调宽；右侧数据库栏从左边界调宽。
+        # 两侧隐藏/展开使用独立悬停控制带，不与拖拽区域共用。
         # --------------------------------------------------------------
         template_page = QWidget()
         template_layout = QVBoxLayout(template_page)
@@ -117,7 +117,8 @@ class WorkspaceWindow(QMainWindow):
             panel_index=2,
             handle_index=2,
             expanded_width=450,
-            resizable=False,
+            # handle 2 就是数据库栏左边界，保留拖动；数据库栏右边没有 splitter handle。
+            resizable=True,
         )
         template_layout.addWidget(main_splitter, 1)
         self._main_splitter = main_splitter
@@ -187,13 +188,10 @@ class WorkspaceWindow(QMainWindow):
         return page
 
     def _prepare_side_panel_headers(self):
-        # 左侧：外层 QGroupBox 提供“字体 / 样式 / 边框”标题；内部不再显示
-        # 看起来像按钮的 QToolBox 标题。“当前选中范围”继续保留。
         style_page = self._flatten_toolbox_page(self._style_panel)
         if style_page is not None:
             self._style_panel._main_layout.insertWidget(1, style_page, 1)
 
-        # 右侧：不显示“当前选中范围”，数据库和时间各有独立醒目标题。
         selection_label = getattr(self._db_panel, "_lbl_scope", None)
         if selection_label is not None and selection_label.parentWidget() is not None:
             selection_label.parentWidget().hide()
@@ -288,7 +286,6 @@ class WorkspaceWindow(QMainWindow):
     def _refresh_after_global_action(self):
         self._wire_global_menu_refresh()
         if hasattr(self, "_file_behavior"):
-            # 导入/删除预设会让 MainWindow 重建原菜单，这里重新套上未保存保护。
             self._file_behavior.rebuild_guarded_preset_menu()
         self._sync_side_panel_templates()
         self._db_panel._db_metadata = {}
