@@ -57,7 +57,9 @@ class WorkspaceWindow(QMainWindow):
         preview_layout.addWidget(self._report_preview, 1)
 
         # --------------------------------------------------------------
-        # 模板编辑页：编辑工具栏 + 可完全收起左右侧栏 + 表格
+        # 模板编辑页：编辑工具栏 + 左右侧栏 + 表格
+        # 左侧字体栏可拖动调宽；右侧数据库栏固定宽度。
+        # 两侧隐藏/展开均使用独立悬停控制带，不与拖拽区域共用。
         # --------------------------------------------------------------
         template_page = QWidget()
         template_layout = QVBoxLayout(template_page)
@@ -67,8 +69,6 @@ class WorkspaceWindow(QMainWindow):
         self._template_toolbar = self._build_template_toolbar(template_page)
         template_layout.addWidget(self._template_toolbar)
 
-        # 使用自定义 QSplitter：分隔线本身就是拖拽条，也是悬停收起/展开入口。
-        # 因此不会再额外占用 18px 的常驻侧栏容器。
         main_splitter = CollapsibleSplitter()
 
         self._style_group = QGroupBox("字体 / 样式 / 边框")
@@ -106,10 +106,18 @@ class WorkspaceWindow(QMainWindow):
         main_splitter.setStretchFactor(1, 1)
         main_splitter.setStretchFactor(2, 0)
         main_splitter.configure_side(
-            "left", panel_index=0, handle_index=1, expanded_width=320
+            "left",
+            panel_index=0,
+            handle_index=1,
+            expanded_width=320,
+            resizable=True,
         )
         main_splitter.configure_side(
-            "right", panel_index=2, handle_index=2, expanded_width=450
+            "right",
+            panel_index=2,
+            handle_index=2,
+            expanded_width=450,
+            resizable=False,
         )
         template_layout.addWidget(main_splitter, 1)
         self._main_splitter = main_splitter
