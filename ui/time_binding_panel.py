@@ -2,10 +2,10 @@
 
 from copy import deepcopy
 
-from PyQt6.QtCore import QDateTime, Qt, pyqtSignal
+from PyQt6.QtCore import QDateTime, Qt, QEvent, QObject, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QGroupBox, QFormLayout, QCheckBox, QComboBox,
-    QLineEdit, QDateTimeEdit, QLabel,
+    QDateTimeEdit, QLabel, QCompleter,
 )
 
 from models.time_binding import TimeBinding, TimeRangeType, TimeMode
@@ -21,12 +21,25 @@ _RANGE_LABELS = {
 _LABEL_TO_RANGE = {v: k for k, v in _RANGE_LABELS.items()}
 
 
-class TimeBindingPanel(QWidget):
-    """为模板当前单元格/选区配置时间规则。
+class _TimeFieldPopupFilter(QObject):
+    """时间字段下拉框：点击/聚焦展开，输入时使用本地候选匹配。"""
 
-    多选时采用与样式、数据库一致的增量修改：改哪个时间属性，就只把
-    该属性应用到所有选中单元格，不覆盖其余时间设置。
-    """
+    def __init__(self, combo, parent=None):
+        super().__init__(parent or combo)
+        self._combo = combo
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.Type.FocusIn, QEvent.Type.MouseButtonPress):
+            QTimer.singleShot(0, self._show)
+        return False
+
+    def _show(self):
+        if self._combo.isEnabled() and self._combo.isVisible():
+            self._combo.showPopup()
+
+
+class TimeBindingPanel(QWidget):
+    """为模板当前单元格/选区配置时间规则。"""
 
     time_binding_changed = pyqtSignal()
 
@@ -70,9 +83,26 @@ class TimeBindingPanel(QWidget):
         self._enabled.stateChanged.connect(self._changed)
         form.addRow(self._enabled)
 
-        self._time_field = QLineEdit()
-        self._time_field.setPlaceholderText("数据库时间字段，如 record_time")
-        self._time_field.textChanged.connect(self._changed)
+        # 时间字段也是数据库字段，使用与数据库侧栏一致的可输入下拉框。
+        self._time_field = QComboBox()
+        self._time_field.setEditable(True)
+        self._time_field.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._time_field.lineEdit().setPlaceholderText("选择或输入时间字段")
+        completer = self._time_field.completer()
+        if completer is not None:
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self._time_field_filter = _TimeFieldPopupFilter(self._time_field, self._time_field)
+        self._time_field.lineEdit().installEventFilter(self._time_field_filter)
+        self._time_field.lineEdit().textEdited.connect(
+            lambda _text: QTimer.singleShot(
+                0,
+                lambda: self._time_field.completer().complete()
+                if self._time_field.completer() is not None else None,
+            )
+        )
+        self._time_field.currentTextChanged.connect(self._changed)
         form.addRow("时间字段:", self._time_field)
 
         self._range_type = QComboBox()
@@ -100,6 +130,15 @@ class TimeBindingPanel(QWidget):
         root.addWidget(self._config_group)
         root.addStretch(1)
         self._config_group.hide()
+
+    def set_field_choices(self, fields: list[str]):
+        """更新缓存字段候选，不访问数据库，并保留当前输入。"""
+        current = self._time_field.currentText()
+        self._time_field.blockSignals(True)
+        self._time_field.clear()
+        self._time_field.addItems(list(dict.fromkeys(fields or [])))
+        self._time_field.setCurrentText(current)
+        self._time_field.blockSignals(False)
 
     def set_selected_cells(self, cells: list):
         self._selected_cells = list(dict.fromkeys(cells or []))
@@ -172,7 +211,7 @@ class TimeBindingPanel(QWidget):
         try:
             binding = qb.time_binding if qb else TimeBinding()
             self._enabled.setChecked(binding.enabled)
-            self._time_field.setText(binding.time_field)
+            self._time_field.setCurrentText(binding.time_field)
             self._range_type.setCurrentText(_RANGE_LABELS.get(binding.range_type, "日"))
             self._mode.setCurrentIndex(1 if binding.mode == TimeMode.CURRENT else 0)
             if binding.fixed_start:
@@ -208,7 +247,7 @@ class TimeBindingPanel(QWidget):
         if sender is self._enabled:
             return {"enabled": self._enabled.isChecked()}
         if sender is self._time_field:
-            return {"time_field": self._time_field.text().strip()}
+            return {"time_field": self._time_field.currentText().strip()}
         if sender is self._range_type:
             return {
                 "range_type": _LABEL_TO_RANGE.get(
