@@ -1,6 +1,7 @@
 """应用工作区：全局文件/数据库 + 报表预览/模板编辑。"""
 
 from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget, QGroupBox,
     QToolBar, QMenuBar, QMenu, QLabel,
@@ -17,11 +18,7 @@ from ui.workspace_behaviors import WorkspaceFileBehavior
 
 
 class WorkspaceWindow(QMainWindow):
-    """工作区层级：全局“文件/数据库” > “报表预览/模板编辑”。
-
-    文件与数据库决定当前工作区使用的模板和数据源，因此同时影响两个页面；
-    撤销、复制、粘贴、合并、行列操作等编辑命令只属于模板编辑页。
-    """
+    """工作区层级：全局“文件/数据库” > “报表预览/模板编辑”。"""
 
     def __init__(self):
         super().__init__()
@@ -59,7 +56,6 @@ class WorkspaceWindow(QMainWindow):
         # --------------------------------------------------------------
         # 模板编辑页：
         # [左隐藏控制] [样式栏 |拖拽| 表格 |拖拽| 数据库栏] [右隐藏控制]
-        # 隐藏/显示和调宽彻底分离，且隐藏控制永远固定在编辑区最外侧。
         # --------------------------------------------------------------
         template_page = QWidget()
         template_layout = QVBoxLayout(template_page)
@@ -110,22 +106,11 @@ class WorkspaceWindow(QMainWindow):
         main_splitter.setStretchFactor(0, 0)
         main_splitter.setStretchFactor(1, 1)
         main_splitter.setStretchFactor(2, 0)
-        main_splitter.configure_side(
-            "left",
-            panel_index=0,
-            expanded_width=320,
-        )
-        main_splitter.configure_side(
-            "right",
-            panel_index=2,
-            expanded_width=450,
-        )
+        main_splitter.configure_side("left", panel_index=0, expanded_width=320)
+        main_splitter.configure_side("right", panel_index=2, expanded_width=450)
 
-        # 左侧隐藏控制固定在样式栏最左边；这里绝不承担调宽。
         self._left_toggle_strip = SidebarToggleStrip(main_splitter, "left", editor_row)
         main_splitter.register_toggle_strip("left", self._left_toggle_strip)
-
-        # 右侧隐藏控制固定在数据库栏最右边、程序边框内；这里绝不承担调宽。
         self._right_toggle_strip = SidebarToggleStrip(main_splitter, "right", editor_row)
         main_splitter.register_toggle_strip("right", self._right_toggle_strip)
 
@@ -158,7 +143,6 @@ class WorkspaceWindow(QMainWindow):
         workspace_layout.addWidget(self._tabs, 1)
         self.setCentralWidget(workspace)
 
-        # 工作区信号
         self._editor._preview.selection_changed.connect(self._on_editor_selection)
         self._editor._preview.cells_selected.connect(self._on_editor_cells_selected)
 
@@ -172,14 +156,12 @@ class WorkspaceWindow(QMainWindow):
 
         install_editor_history(self._editor, after_change=self._refresh_side_panels)
 
-        # 数据库等全局动作仍走统一刷新；随后文件动作升级为“未保存保护”。
         self._wire_global_menu_refresh()
         self._file_behavior = WorkspaceFileBehavior(self, self._editor)
 
         self._tabs.setCurrentIndex(0)
         self._report_preview.sync_template()
 
-        # MainWindow 自带菜单/工具栏仅作为 QAction 来源，不再重复显示。
         self._editor.menuBar().hide()
         for toolbar in self._editor.findChildren(QToolBar):
             if toolbar.windowTitle() == "主工具栏" and toolbar is not self._template_toolbar:
@@ -189,7 +171,6 @@ class WorkspaceWindow(QMainWindow):
     # 侧栏标题与分区视觉
     # ==================================================================
     def _flatten_toolbox_page(self, panel):
-        """把只有一个页面的 QToolBox 去掉按钮式页签，只保留实际设置内容。"""
         toolbox = getattr(panel, "_toolbox", None)
         if toolbox is None or toolbox.count() == 0:
             return None
@@ -248,12 +229,30 @@ class WorkspaceWindow(QMainWindow):
         bar.setObjectName("globalWorkspaceMenuBar")
         bar.setNativeMenuBar(False)
 
+        self._act_refresh_database = None
         for source_menu in self._source_global_menus():
             menu = QMenu(source_menu.title(), bar)
             for action in source_menu.actions():
                 menu.addAction(action)
+
+            clean = source_menu.title().replace("&", "")
+            if clean.startswith("数据库"):
+                menu.addSeparator()
+                self._act_refresh_database = QAction("刷新数据库", self)
+                self._act_refresh_database.setToolTip("重新读取当前数据库的数据表和字段")
+                self._act_refresh_database.triggered.connect(self._refresh_database_metadata)
+                menu.addAction(self._act_refresh_database)
+
             bar.addMenu(menu)
         return bar
+
+    def _refresh_database_metadata(self):
+        """显式刷新数据库结构；这是模板编辑阶段唯一的元数据联网入口。"""
+        ok = self._db_panel.refresh_database_metadata()
+        if ok:
+            self._editor._status_label.setText("数据库已刷新")
+        else:
+            self._editor._status_label.setText("未读取到数据库")
 
     # ==================================================================
     # 模板页第二排：仅模板编辑使用的工具栏
@@ -301,7 +300,8 @@ class WorkspaceWindow(QMainWindow):
         if hasattr(self, "_file_behavior"):
             self._file_behavior.rebuild_guarded_preset_menu()
         self._sync_side_panel_templates()
-        self._db_panel._db_metadata = {}
+        # 不再因为切换模板/执行菜单动作就无条件清空数据库元数据。
+        # DatabaseBindingPanel 会在“数据库配置确实改变”时自行清缓存，但不会联网。
         self._report_preview.sync_template()
 
     def _install_template_query_formatter(self):
