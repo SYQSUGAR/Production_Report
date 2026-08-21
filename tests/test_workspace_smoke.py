@@ -35,29 +35,50 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertEqual(self.window._tabs.tabText(1), "模板编辑")
         self.assertEqual(self.window._tabs.currentIndex(), 0)
 
-    def test_edit_menu_and_toolbar_live_inside_template_page_only(self):
-        # Workspace 顶层不再承载模板编辑菜单/工具栏。
-        self.assertFalse(self.window.menuBar().isVisible())
+    @staticmethod
+    def _menu_titles(bar):
+        return [a.text().replace("&", "") for a in bar.actions()]
 
-        self.assertEqual(
-            [a.text().replace("&", "") for a in self.window._template_menu_bar.actions()],
-            [a.text().replace("&", "") for a in self.window._editor.menuBar().actions()],
-        )
-        self.assertEqual(
-            [a.text() for a in self.window._template_toolbar.actions()],
-            [a.text() for tb in self.window._editor.findChildren(type(self.window._template_toolbar))
-             if tb.windowTitle() == "主工具栏" and tb is not self.window._template_toolbar
-             for a in tb.actions()],
-        )
+    def test_file_and_database_are_global_but_edit_menu_is_removed(self):
+        preview_titles = self._menu_titles(self.window._preview_menu_bar)
+        template_titles = self._menu_titles(self.window._template_menu_bar)
 
-        # 默认在预览页时，模板页整体不可见，因此两排编辑操作也不可见。
-        self.assertFalse(self.window._template_menu_bar.isVisible())
+        self.assertEqual(preview_titles, template_titles)
+        self.assertTrue(any(t.startswith("文件") for t in preview_titles))
+        self.assertTrue(any(t.startswith("数据库") for t in preview_titles))
+        self.assertFalse(any(t.startswith("编辑") for t in preview_titles))
+
+        # 默认预览页：全局第一排可见，但模板编辑工具栏不可见。
+        self.assertTrue(self.window._preview_menu_bar.isVisible())
         self.assertFalse(self.window._template_toolbar.isVisible())
 
+        # 切到模板编辑：第一排仍是文件/数据库，第二排编辑工具栏才出现。
         self.window._tabs.setCurrentIndex(1)
         self.app.processEvents()
         self.assertTrue(self.window._template_menu_bar.isVisible())
         self.assertTrue(self.window._template_toolbar.isVisible())
+
+    def test_template_toolbar_keeps_original_action_order(self):
+        source = None
+        for tb in self.window._editor.findChildren(type(self.window._template_toolbar)):
+            if tb.windowTitle() == "主工具栏" and tb is not self.window._template_toolbar:
+                source = tb
+                break
+        self.assertIsNotNone(source)
+        self.assertEqual(
+            [a.text() for a in self.window._template_toolbar.actions()],
+            [a.text() for a in source.actions()],
+        )
+
+    def test_global_refresh_resyncs_report_preview(self):
+        calls = []
+        original = self.window._report_preview.sync_template
+        self.window._report_preview.sync_template = lambda: calls.append(True)
+        try:
+            self.window._refresh_after_global_action()
+        finally:
+            self.window._report_preview.sync_template = original
+        self.assertEqual(calls, [True])
 
     def test_side_panels_do_not_cross_construct_controls(self):
         self.assertTrue(hasattr(self.window._style_panel, "_nf_grp"))
