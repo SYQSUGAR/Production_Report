@@ -84,12 +84,19 @@ class PresetSaveDialog(QDialog):
 
     def _reload_presets(self):
         self._list.clear()
+        custom = get_custom_presets()
+
+        # 同名自定义预设视为对内置预设的覆盖，只显示一项，避免名称重复。
         for name in BUILTIN_TEMPLATES:
+            if name in custom:
+                continue
             item = QListWidgetItem(f"[内置] {name}")
             item.setData(Qt.ItemDataRole.UserRole, (name, "builtin"))
             self._list.addItem(item)
-        for name in get_custom_presets():
-            item = QListWidgetItem(f"[自定义] {name}")
+
+        for name in custom:
+            label = "[自定义·覆盖内置]" if name in BUILTIN_TEMPLATES else "[自定义]"
+            item = QListWidgetItem(f"{label} {name}")
             item.setData(Qt.ItemDataRole.UserRole, (name, "custom"))
             self._list.addItem(item)
 
@@ -105,7 +112,7 @@ class PresetSaveDialog(QDialog):
         try:
             if kind == "builtin":
                 model = BUILTIN_TEMPLATES[name]()
-                label = "内置预设（只读）"
+                label = "内置预设"
             else:
                 model = load_template_by_name(name)
                 label = "自定义预设"
@@ -127,6 +134,8 @@ class PresetSaveDialog(QDialog):
         return reply == QMessageBox.StandardButton.Yes
 
     def _write(self, name: str):
+        # 即使名称原来属于内置模板，也写入自定义预设目录；加载时自定义优先，
+        # 因而实现“覆盖”。删除该自定义预设后，原内置模板会自然恢复。
         save_as_custom_preset(self._source_template, name)
         self._result_name = name
         self.accept()
@@ -138,16 +147,9 @@ class PresetSaveDialog(QDialog):
             self._name.setFocus()
             return
 
-        # 内置预设由程序代码提供，不能写回；自定义预设则严格按名称判断覆盖。
-        if name in BUILTIN_TEMPLATES:
-            QMessageBox.warning(
-                self,
-                "不能覆盖内置预设",
-                "该名称属于内置预设，不能直接覆盖。请修改预设名称后保存。",
-            )
-            return
-
-        if name in get_custom_presets() and not self._confirm_replace(name):
+        custom = get_custom_presets()
+        exists = name in custom or name in BUILTIN_TEMPLATES
+        if exists and not self._confirm_replace(name):
             return
         self._write(name)
 
@@ -226,15 +228,19 @@ class WorkspaceFileBehavior:
     def rebuild_guarded_preset_menu(self):
         menu = self.editor._preset_menu
         menu.clear()
-        from templates.presets import get_custom_presets
+        custom = get_custom_presets()
+
         for name in BUILTIN_TEMPLATES:
+            if name in custom:
+                continue
             action = menu.addAction(f"[内置] {name}")
             action.triggered.connect(lambda _checked=False, n=name: self._load_preset(n))
-        custom = get_custom_presets()
+
         if custom:
             menu.addSeparator()
             for name in custom:
-                action = menu.addAction(f"[自定义] {name}")
+                label = "[自定义·覆盖内置]" if name in BUILTIN_TEMPLATES else "[自定义]"
+                action = menu.addAction(f"{label} {name}")
                 action.triggered.connect(lambda _checked=False, n=name: self._load_preset(n))
 
     def _saved_file_matches_current(self) -> bool:
