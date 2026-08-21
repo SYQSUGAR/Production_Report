@@ -114,7 +114,20 @@ class WorkspaceSmokeTest(unittest.TestCase):
         left_strip = splitter._toggle_strips["left"]
         right_strip = splitter._toggle_strips["right"]
 
-        # 收起/展开热区位于拖拽 handle 的表格一侧，而不是与 handle 重叠。
+        # 两条隐藏/展开热区必须作为独立前景控件存在，并有足够宽度显示箭头。
+        self.assertTrue(left_strip.isVisible())
+        self.assertTrue(right_strip.isVisible())
+        self.assertGreaterEqual(left_strip.width(), 18)
+        self.assertGreaterEqual(right_strip.width(), 18)
+
+        # 左侧字体栏允许拖动；右侧数据库栏固定宽度，不允许拖动边界。
+        self.assertTrue(splitter._side_specs["left"]["resizable"])
+        self.assertFalse(splitter._side_specs["right"]["resizable"])
+        self.assertTrue(left_handle._resize_enabled)
+        self.assertFalse(right_handle._resize_enabled)
+        self.assertEqual(right_handle.cursor().shape(), Qt.CursorShape.ArrowCursor)
+
+        # 收起/展开热区位于边界的表格一侧，不与拖拽区重叠。
         self.assertGreaterEqual(left_strip.geometry().left(), left_handle.geometry().right())
         self.assertLessEqual(right_strip.geometry().right(), right_handle.geometry().left())
 
@@ -123,7 +136,6 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(splitter.side_collapsed("left"))
         self.assertLessEqual(splitter.sizes()[0], 1)
-        self.assertTrue(left_handle.isVisible())
         self.assertTrue(left_strip.isVisible())
 
         splitter.set_side_collapsed("left", False)
@@ -136,13 +148,13 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(splitter.side_collapsed("right"))
         self.assertLessEqual(splitter.sizes()[2], 1)
-        self.assertTrue(right_handle.isVisible())
         self.assertTrue(right_strip.isVisible())
 
         splitter.set_side_collapsed("right", False)
         self.app.processEvents()
         self.assertFalse(splitter.side_collapsed("right"))
         self.assertGreater(splitter.sizes()[2], 1)
+        self.assertEqual(splitter.sizes()[2], 450)
 
     def test_side_panel_headers_match_requested_hierarchy(self):
         self.assertEqual(self.window._style_group.title(), "字体 / 样式 / 边框")
