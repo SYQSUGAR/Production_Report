@@ -85,15 +85,12 @@ class PresetSaveDialog(QDialog):
     def _reload_presets(self):
         self._list.clear()
         custom = get_custom_presets()
-
-        # 同名自定义预设视为对内置预设的覆盖，只显示一项，避免名称重复。
         for name in BUILTIN_TEMPLATES:
             if name in custom:
                 continue
             item = QListWidgetItem(f"[内置] {name}")
             item.setData(Qt.ItemDataRole.UserRole, (name, "builtin"))
             self._list.addItem(item)
-
         for name in custom:
             label = "[自定义·覆盖内置]" if name in BUILTIN_TEMPLATES else "[自定义]"
             item = QListWidgetItem(f"{label} {name}")
@@ -104,9 +101,6 @@ class PresetSaveDialog(QDialog):
         if current is None:
             return
         name, kind = current.data(Qt.ItemDataRole.UserRole)
-
-        # 点击已有预设只做两件事：把名字填入输入框，并预览该预设。
-        # 最终是否覆盖完全由“预设名称”输入框 + 保存按钮决定。
         self._name.setText(name)
         self._name.selectAll()
         try:
@@ -124,18 +118,17 @@ class PresetSaveDialog(QDialog):
             self._preview_title.setText(f"无法预览：{exc}")
 
     def _confirm_replace(self, name: str) -> bool:
-        reply = QMessageBox.question(
-            self,
-            "覆盖预设模板",
-            f"预设模板“{name}”已经存在。\n\n是否用当前模板覆盖它？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        return reply == QMessageBox.StandardButton.Yes
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("覆盖预设模板")
+        box.setText(f"预设模板“{name}”已存在，是否覆盖？")
+        overwrite_btn = box.addButton("覆盖", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(overwrite_btn)
+        box.exec()
+        return box.clickedButton() is overwrite_btn
 
     def _write(self, name: str):
-        # 即使名称原来属于内置模板，也写入自定义预设目录；加载时自定义优先，
-        # 因而实现“覆盖”。删除该自定义预设后，原内置模板会自然恢复。
         save_as_custom_preset(self._source_template, name)
         self._result_name = name
         self.accept()
@@ -146,7 +139,6 @@ class PresetSaveDialog(QDialog):
             QMessageBox.information(self, "请输入名称", "请输入预设名称。")
             self._name.setFocus()
             return
-
         custom = get_custom_presets()
         exists = name in custom or name in BUILTIN_TEMPLATES
         if exists and not self._confirm_replace(name):
@@ -156,10 +148,6 @@ class PresetSaveDialog(QDialog):
 
 class WorkspaceFileBehavior:
     """把 MainWindow 的文件动作升级为工作区级、带未保存保护的行为。"""
-
-    _DESTRUCTIVE_TEXTS = (
-        "新建模板", "打开模板", "导入 Excel", "恢复默认模板",
-    )
 
     def __init__(self, workspace, editor):
         self.workspace = workspace
@@ -217,25 +205,21 @@ class WorkspaceFileBehavior:
         self._replace_trigger(self._find_action("保存模板"), self._save)
         self._replace_trigger(self._find_action("另存模板"), self._save_as)
         self._replace_trigger(self._find_action("将当前模板保存为预设"), self._save_preset)
-
         self._replace_trigger(self._find_action("新建模板"), self._new)
         self._replace_trigger(self._find_action("打开模板"), self._open)
         self._replace_trigger(self._find_action("导入 Excel"), self._import_excel)
         self._replace_trigger(self._find_action("恢复默认模板"), self._restore_default)
-
         self.rebuild_guarded_preset_menu()
 
     def rebuild_guarded_preset_menu(self):
         menu = self.editor._preset_menu
         menu.clear()
         custom = get_custom_presets()
-
         for name in BUILTIN_TEMPLATES:
             if name in custom:
                 continue
             action = menu.addAction(f"[内置] {name}")
             action.triggered.connect(lambda _checked=False, n=name: self._load_preset(n))
-
         if custom:
             menu.addSeparator()
             for name in custom:
@@ -255,22 +239,25 @@ class WorkspaceFileBehavior:
     def confirm_replace_current(self) -> bool:
         if not self.is_dirty():
             return True
+
         box = QMessageBox(self.workspace)
         box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("当前模板尚未保存")
-        box.setText("当前模板已经修改，但尚未保存。")
-        box.setInformativeText("在打开其他模板之前，是否保存当前修改？")
-        box.setStandardButtons(
-            QMessageBox.StandardButton.Save |
-            QMessageBox.StandardButton.Discard |
-            QMessageBox.StandardButton.Cancel
-        )
-        box.setDefaultButton(QMessageBox.StandardButton.Save)
-        result = box.exec()
-        if result == QMessageBox.StandardButton.Cancel:
+        box.setWindowTitle("模板未保存")
+        box.setText("当前模板已修改，是否保存？")
+        save_btn = box.addButton("保存", QMessageBox.ButtonRole.AcceptRole)
+        discard_btn = box.addButton("不保存", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(save_btn)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is cancel_btn:
             return False
-        if result == QMessageBox.StandardButton.Discard:
+        if clicked is discard_btn:
             return True
+        if clicked is not save_btn:
+            return False
+
         self.editor._save_template()
         if self._saved_file_matches_current():
             self.mark_clean()
@@ -330,8 +317,6 @@ class WorkspaceFileBehavior:
         before = self.editor._template
         self.editor._restore_default_template()
         if self.editor._template is not before:
-            # 默认模板和预设一样，不对应用户打开的本地 JSON 源文件。
-            # 因此恢复默认模板后 Ctrl+S 应进入“另存为 JSON”，不能覆盖之前的本地文件。
             self.editor._current_filepath = ""
             self._after_replaced()
 
