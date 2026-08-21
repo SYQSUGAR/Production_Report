@@ -330,6 +330,9 @@ class WorkspaceFileBehavior:
         before = self.editor._template
         self.editor._restore_default_template()
         if self.editor._template is not before:
+            # 默认模板和预设一样，不对应用户打开的本地 JSON 源文件。
+            # 因此恢复默认模板后 Ctrl+S 应进入“另存为 JSON”，不能覆盖之前的本地文件。
+            self.editor._current_filepath = ""
             self._after_replaced()
 
     def _load_preset(self, name: str):
