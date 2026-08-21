@@ -4,7 +4,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QGroupBox, QLabel
+from PyQt6.QtWidgets import QApplication, QGroupBox, QLabel, QComboBox
 
 from ui.workspace_window import WorkspaceWindow
 from ui.workspace_behaviors import PresetSaveDialog
@@ -50,6 +50,19 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertTrue(self.window._global_menu_bar.isVisible())
         self.assertIs(self.window._global_menu_bar.parent(), self.window.centralWidget())
 
+    def test_database_menu_has_explicit_refresh_database_action(self):
+        self.assertIsNotNone(self.window._act_refresh_database)
+        self.assertEqual(self.window._act_refresh_database.text(), "刷新数据库")
+
+        db_menu = None
+        for action in self.window._global_menu_bar.actions():
+            menu = action.menu()
+            if menu and menu.title().replace("&", "").startswith("数据库"):
+                db_menu = menu
+                break
+        self.assertIsNotNone(db_menu)
+        self.assertIn("刷新数据库", [a.text() for a in db_menu.actions()])
+
     def test_template_toolbar_is_template_page_only(self):
         self.assertFalse(self.window._template_toolbar.isVisible())
         self.window._tabs.setCurrentIndex(1)
@@ -92,6 +105,15 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertTrue(hasattr(self.window._db_panel, "_chk_db_enabled"))
         self.assertFalse(hasattr(self.window._db_panel, "_nf_grp"))
 
+    def test_time_field_is_searchable_database_field_dropdown(self):
+        self.assertIsInstance(self.window._time_panel._time_field, QComboBox)
+        self.assertTrue(self.window._time_panel._time_field.isEditable())
+        self.assertIsNotNone(self.window._time_panel._time_field.completer())
+        self.assertEqual(
+            self.window._time_panel._time_field.completer().filterMode(),
+            Qt.MatchFlag.MatchContains,
+        )
+
     def test_sidebar_outer_toggles_and_inner_resize_handles_are_fixed(self):
         self.window._tabs.setCurrentIndex(1)
         self.app.processEvents()
@@ -100,7 +122,6 @@ class WorkspaceSmokeTest(unittest.TestCase):
         left_strip = self.window._left_toggle_strip
         right_strip = self.window._right_toggle_strip
 
-        # 隐藏/显示控制必须在 splitter 外部，因此不会跟着 handle 重排位置。
         self.assertIsNot(left_strip.parentWidget(), splitter)
         self.assertIsNot(right_strip.parentWidget(), splitter)
         self.assertEqual(left_strip.width(), 16)
@@ -108,8 +129,6 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertTrue(left_strip.isVisible())
         self.assertTrue(right_strip.isVisible())
 
-        # QSplitter 三个内容区只会产生两条内部 handle：
-        # handle(1) = 样式栏右边界；handle(2) = 数据库栏左边界。
         self.assertEqual(splitter.count(), 3)
         self.assertEqual(splitter.handleWidth(), 5)
         self.assertIsNotNone(splitter.handle(1))
@@ -117,7 +136,6 @@ class WorkspaceSmokeTest(unittest.TestCase):
         self.assertEqual(splitter.handle(1).cursor().shape(), Qt.CursorShape.SplitHCursor)
         self.assertEqual(splitter.handle(2).cursor().shape(), Qt.CursorShape.SplitHCursor)
 
-        # 左右侧栏都仍可压缩到 0；外侧控制条始终保留，不会跑位。
         splitter.set_side_collapsed("left", True)
         self.app.processEvents()
         self.assertTrue(splitter.side_collapsed("left"))
