@@ -2,7 +2,7 @@
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QSplitter, QTabWidget, QGroupBox,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget, QGroupBox,
     QToolBar, QMenuBar, QMenu, QLabel,
 )
 
@@ -12,7 +12,7 @@ from ui.report_preview_page import ReportPreviewPage
 from ui.time_binding_panel import TimeBindingPanel
 from ui.editor_side_panels import StyleOnlyPanel, DatabaseBindingPanel
 from ui.editor_history import install_editor_history
-from ui.collapsible_side_panel import CollapsibleSplitter
+from ui.collapsible_side_panel import CollapsibleSplitter, SidebarToggleStrip
 from ui.workspace_behaviors import WorkspaceFileBehavior
 
 
@@ -57,9 +57,9 @@ class WorkspaceWindow(QMainWindow):
         preview_layout.addWidget(self._report_preview, 1)
 
         # --------------------------------------------------------------
-        # 模板编辑页：编辑工具栏 + 左右侧栏 + 表格
-        # 左侧字体栏从右边界调宽；右侧数据库栏从左边界调宽。
-        # 两侧隐藏/展开使用独立悬停控制带，不与拖拽区域共用。
+        # 模板编辑页：
+        # [左隐藏控制] [样式栏 |拖拽| 表格 |拖拽| 数据库栏] [右隐藏控制]
+        # 隐藏/显示和调宽彻底分离，且隐藏控制永远固定在编辑区最外侧。
         # --------------------------------------------------------------
         template_page = QWidget()
         template_layout = QVBoxLayout(template_page)
@@ -68,6 +68,11 @@ class WorkspaceWindow(QMainWindow):
 
         self._template_toolbar = self._build_template_toolbar(template_page)
         template_layout.addWidget(self._template_toolbar)
+
+        editor_row = QWidget()
+        editor_row_layout = QHBoxLayout(editor_row)
+        editor_row_layout.setContentsMargins(0, 0, 0, 0)
+        editor_row_layout.setSpacing(0)
 
         main_splitter = CollapsibleSplitter()
 
@@ -108,19 +113,27 @@ class WorkspaceWindow(QMainWindow):
         main_splitter.configure_side(
             "left",
             panel_index=0,
-            handle_index=1,
             expanded_width=320,
-            resizable=True,
         )
         main_splitter.configure_side(
             "right",
             panel_index=2,
-            handle_index=2,
             expanded_width=450,
-            # handle 2 就是数据库栏左边界，保留拖动；数据库栏右边没有 splitter handle。
-            resizable=True,
         )
-        template_layout.addWidget(main_splitter, 1)
+
+        # 左侧隐藏控制固定在样式栏最左边；这里绝不承担调宽。
+        self._left_toggle_strip = SidebarToggleStrip(main_splitter, "left", editor_row)
+        main_splitter.register_toggle_strip("left", self._left_toggle_strip)
+
+        # 右侧隐藏控制固定在数据库栏最右边、程序边框内；这里绝不承担调宽。
+        self._right_toggle_strip = SidebarToggleStrip(main_splitter, "right", editor_row)
+        main_splitter.register_toggle_strip("right", self._right_toggle_strip)
+
+        editor_row_layout.addWidget(self._left_toggle_strip)
+        editor_row_layout.addWidget(main_splitter, 1)
+        editor_row_layout.addWidget(self._right_toggle_strip)
+
+        template_layout.addWidget(editor_row, 1)
         self._main_splitter = main_splitter
         self._right_panel_container = right
 
