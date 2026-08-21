@@ -39,24 +39,36 @@ class WorkspaceSmokeTest(unittest.TestCase):
     def _menu_titles(bar):
         return [a.text().replace("&", "") for a in bar.actions()]
 
-    def test_file_and_database_are_global_but_edit_menu_is_removed(self):
-        preview_titles = self._menu_titles(self.window._preview_menu_bar)
-        template_titles = self._menu_titles(self.window._template_menu_bar)
+    def test_global_file_database_bar_is_single_and_above_tabs(self):
+        titles = self._menu_titles(self.window._global_menu_bar)
+        self.assertTrue(any(t.startswith("文件") for t in titles))
+        self.assertTrue(any(t.startswith("数据库") for t in titles))
+        self.assertFalse(any(t.startswith("编辑") for t in titles))
 
-        self.assertEqual(preview_titles, template_titles)
-        self.assertTrue(any(t.startswith("文件") for t in preview_titles))
-        self.assertTrue(any(t.startswith("数据库") for t in preview_titles))
-        self.assertFalse(any(t.startswith("编辑") for t in preview_titles))
+        # 全局菜单只有一份，父级是整个 workspace，而不是某一个页签页面。
+        self.assertTrue(self.window._global_menu_bar.isVisible())
+        self.assertIs(self.window._global_menu_bar.parent(), self.window.centralWidget())
 
-        # 默认预览页：全局第一排可见，但模板编辑工具栏不可见。
-        self.assertTrue(self.window._preview_menu_bar.isVisible())
-        self.assertFalse(self.window._template_toolbar.isVisible())
-
-        # 切到模板编辑：第一排仍是文件/数据库，第二排编辑工具栏才出现。
+        # 切换到任一页面，全局菜单始终存在。
         self.window._tabs.setCurrentIndex(1)
         self.app.processEvents()
-        self.assertTrue(self.window._template_menu_bar.isVisible())
+        self.assertTrue(self.window._global_menu_bar.isVisible())
+
+        self.window._tabs.setCurrentIndex(0)
+        self.app.processEvents()
+        self.assertTrue(self.window._global_menu_bar.isVisible())
+
+    def test_template_toolbar_is_template_page_only(self):
+        # 默认在预览页，模板编辑工具栏不显示。
+        self.assertFalse(self.window._template_toolbar.isVisible())
+
+        self.window._tabs.setCurrentIndex(1)
+        self.app.processEvents()
         self.assertTrue(self.window._template_toolbar.isVisible())
+
+        self.window._tabs.setCurrentIndex(0)
+        self.app.processEvents()
+        self.assertFalse(self.window._template_toolbar.isVisible())
 
     def test_template_toolbar_keeps_original_action_order(self):
         source = None
@@ -70,15 +82,20 @@ class WorkspaceSmokeTest(unittest.TestCase):
             [a.text() for a in source.actions()],
         )
 
-    def test_global_refresh_resyncs_report_preview(self):
-        calls = []
-        original = self.window._report_preview.sync_template
-        self.window._report_preview.sync_template = lambda: calls.append(True)
+    def test_global_refresh_resyncs_report_preview_and_editor_side_panels(self):
+        preview_calls = []
+        sync_calls = []
+        original_preview = self.window._report_preview.sync_template
+        original_sync = self.window._sync_side_panel_templates
+        self.window._report_preview.sync_template = lambda: preview_calls.append(True)
+        self.window._sync_side_panel_templates = lambda: sync_calls.append(True)
         try:
             self.window._refresh_after_global_action()
         finally:
-            self.window._report_preview.sync_template = original
-        self.assertEqual(calls, [True])
+            self.window._report_preview.sync_template = original_preview
+            self.window._sync_side_panel_templates = original_sync
+        self.assertEqual(preview_calls, [True])
+        self.assertEqual(sync_calls, [True])
 
     def test_side_panels_do_not_cross_construct_controls(self):
         self.assertTrue(hasattr(self.window._style_panel, "_nf_grp"))
