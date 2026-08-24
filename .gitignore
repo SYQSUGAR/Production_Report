@@ -23,6 +23,11 @@ Thumbs.db
 # Local application runtime state
 .report_editor/
 
+# Local / generated database files
+*.db
+*.sqlite
+*.sqlite3
+
 # Temporary / generated files
 *.tmp
 *.log
