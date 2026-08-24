@@ -2,24 +2,20 @@
 
 本目录只保存根据用户提供的《生产运行日报（2026-06-27）》整理出的验证数据库脚本，**不参与程序源码运行，也不修改现有数据库连接逻辑**。
 
-为了更接近项目实际使用场景，现在提供多套独立数据库，用于验证多数据库配置、表/字段刷新、普通查询、聚合查询、关联查询、时间绑定和不同数据库类型。
-
-## 推荐方式：Docker + 一键启动
-
-仓库根目录已经提供：
+当前推荐方式是不使用 Docker，直接复用电脑上已有的 MySQL 程序：
 
 ```text
-docker-compose.yml
+D:\3SoftWare\mysql
+```
+
+仓库根目录提供：
+
+```text
 start_all.bat
 stop_all.bat
 ```
 
-### 第一次使用
-
-电脑需要安装：
-
-- Python（并已安装项目 `requirements.txt` 中的依赖）；
-- Docker Desktop。
+## 一键启动
 
 双击：
 
@@ -27,27 +23,48 @@ stop_all.bat
 start_all.bat
 ```
 
-启动器会自动完成：
+启动器会：
 
-1. 检查 Python 与 Docker；
-2. 如果 Docker Desktop 已安装但尚未启动，会尝试启动 Docker Desktop 并等待引擎就绪；
-3. 启动固定容器 `production-report-mysql`；
-4. 第一次创建数据卷时，MySQL 自动执行 `01`～`04` 和 `06` 初始化脚本；
-5. 等待 MySQL 健康检查通过；
-6. 运行 `python main.py` 启动生产报表 PyQt 程序；
-7. 正常关闭 PyQt 窗口后，BAT 自动停止 MySQL 容器，但保留数据库数据。
+1. 检查 Python；
+2. 在 `D:\3SoftWare\mysql` 下寻找 `mysqld.exe`、`mysql.exe`、`mysqladmin.exe`；
+3. 为本项目创建独立数据目录 `D:\3SoftWare\mysql\production_report_demo\data`；
+4. 使用固定端口 `127.0.0.1:3307` 启动独立 MySQL 测试实例，不影响电脑上可能已经运行的 3306 MySQL 服务；
+5. 第一次启动时自动执行 `01`～`04` 和 `06` SQL 脚本，创建测试库、表和数据；
+6. 启动 `main.py`；
+7. 正常关闭 PyQt 程序后，自动正常关闭该测试 MySQL 实例，但保留数据目录。
 
-Docker Compose 使用固定容器名和固定数据卷，因此重复运行 `start_all.bat` **不会不断创建新的数据库实例**。下一次启动会复用原来的容器和数据。
+## 防止重复启动
 
-如果程序或启动窗口异常关闭，双击：
+该启动器使用固定：
+
+```text
+端口：3307
+MySQL PID：D:\3SoftWare\mysql\production_report_demo\run\mysqld.pid
+程序 PID：D:\3SoftWare\mysql\production_report_demo\run\app.pid
+数据目录：D:\3SoftWare\mysql\production_report_demo\data
+```
+
+因此再次双击 `start_all.bat` 时：
+
+- 如果 PyQt 程序已经在运行，不会再打开第二个程序；
+- 如果本项目 MySQL 已经在运行，会复用原实例，不会启动第二个数据库；
+- 如果 3307 被未知程序占用，会直接报错并退出，不会误杀未知数据库。
+
+## 一键停止
+
+正常情况下直接关闭 PyQt 窗口即可，`start_all.bat` 会随后自动关闭测试数据库。
+
+如果程序异常、BAT 窗口被关闭，或者想手动全部停止，双击：
 
 ```text
 stop_all.bat
 ```
 
-即可强制停止本项目的参考数据库容器。该操作不会删除数据库数据。
+它会先按 `app.pid` 停止本项目 PyQt 程序，再使用 `mysqladmin shutdown` 正常关闭 3307 测试库；只有正常关闭失败时，才会根据本项目自己的 `mysqld.pid` 强制结束该 PID。
 
-### Docker MySQL 连接信息
+**脚本不会使用 `taskkill /IM mysqld.exe`，因此不会把电脑上其他 MySQL 服务一起杀掉。**
+
+## 程序连接信息
 
 ```text
 数据库类型：MySQL
@@ -58,7 +75,7 @@ stop_all.bat
 字符集：utf8mb4
 ```
 
-可分别建立 4 个连接，只修改“数据库名”：
+分别建立 4 个数据库连接时，只修改数据库名：
 
 ```text
 production_basic_demo
@@ -67,132 +84,74 @@ production_operation_demo
 production_maintenance_demo
 ```
 
-端口特意映射为 `3307`，避免与电脑上可能已经存在的本机 MySQL `3306` 冲突。
+## 数据保存方式
 
-### 数据如何保存
-
-MySQL 真正的数据保存在 Docker 命名卷：
+真正的数据不在 `.sql` 文件中持续运行，而保存在：
 
 ```text
-production-report-mysql-data
+D:\3SoftWare\mysql\production_report_demo\data
 ```
 
-因此：
+`.sql` 文件主要用于第一次初始化和以后需要重新建立测试数据时使用。停止数据库或关闭电脑不会删除数据，下次启动仍读取原来的数据目录。
 
-```text
-docker compose stop
-```
-
-只会停止数据库，不会删除数据。再次启动时原来的库、表和记录仍然存在。
-
-不要随意执行 `docker compose down -v` 或手动删除 `production-report-mysql-data`，除非明确希望清空测试数据库并重新初始化。
-
-## MySQL 验证环境
+## MySQL 验证脚本
 
 ### 01_basic_data.sql
 
-创建数据库：
+创建 `production_basic_demo`，主要包含：
 
-```text
-production_basic_demo
-```
-
-主要表：
-
-- `location`：区域、楼宇、站房等基础资料。
-- `team`：锅炉运行班、制冷班、维修班等班组资料。
-- `equipment`：锅炉、制冷机组等设备资料。
-- `meter_point`：水、电、气、热水等计量点资料。
+- `location`
+- `team`
+- `equipment`
+- `meter_point`
 
 ### 02_energy_data.sql
 
-创建数据库：
+创建 `production_energy_demo`，主要包含：
 
-```text
-production_energy_demo
-```
+- `utility_metric`
+- `utility_daily`
 
-主要表：
-
-- `utility_metric`：指标字典，例如供电量、耗水量、耗气量。
-- `utility_daily`：各区域每日水、电、气、热水等日值/月累计/年累计数据。
-
-2026-06-27 核心值来源于用户提供日报；2026-06-25～26 仅为时间筛选和聚合验证添加的演示数据。
+2026-06-27 核心值来源于用户提供日报；2026-06-25～26 为时间筛选和聚合验证添加的演示数据。
 
 ### 03_operation_data.sql
 
-创建数据库：
+创建 `production_operation_demo`，主要包含：
 
-```text
-production_operation_demo
-```
+- `equipment_runtime`
+- `temperature_record`
 
-主要表：
-
-- `equipment_runtime`：锅炉、制冷机组压力、温度、运行时间和状态。
-- `temperature_record`：热水分区、增压站等温度记录。
-
-包含 `record_time` 和 `report_date` 两类时间字段，专门用于验证报表时间绑定。
+包含 `record_time` 和 `report_date` 两类时间字段。
 
 ### 04_maintenance_data.sql
 
-创建数据库：
+创建 `production_maintenance_demo`，主要包含：
 
-```text
-production_maintenance_demo
-```
-
-主要表：
-
-- `maintenance_daily`：日报中的水维修、电维修、维修服务日/月/年汇总。
-- `maintenance_order`：演示工单明细。
-
-工单明细为功能测试数据，可用于 LIKE、状态字段、日期时间筛选和 COUNT 聚合测试。
+- `maintenance_daily`
+- `maintenance_order`
 
 ### 06_grant_reference_user.sql
 
-为 Docker 自动创建的 `report_user` 授予上述四个验证数据库的访问权限。
-
-## 手工初始化方式
-
-如果不使用 Docker，仍然可以使用原有的一键 MySQL 脚本：
-
-```bash
-mysql -u root -p < reference_database/00_install_all_mysql.sql
-```
-
-它会创建上述 4 个 MySQL 验证数据库。
-
-## 原单库参考脚本
-
-`mysql_reference.sql` 仍保留，创建：
+创建/更新本测试实例专用账号：
 
 ```text
-production_report_demo
+report_user / report123
 ```
 
-其中将日报内容集中在 4 张表中，适合快速验证单数据库场景。
+并授予上述四个测试库访问权限。
 
-## SQL Server 验证环境
+## 其他保留脚本
 
-`05_sqlserver_reference.sql` 创建：
+`mysql_reference.sql`：单数据库快速验证版本，创建 `production_report_demo`。
 
-```text
-production_sqlserver_demo
-```
+`05_sqlserver_reference.sql`：SQL Server 验证版本，创建 `production_sqlserver_demo`。
 
-包含：
-
-- `dbo.utility_daily`
-- `dbo.equipment_runtime`
-- `dbo.maintenance_order`
-
-用于验证程序原有 SQL Server 连接、字段刷新、查询和时间条件。
+`00_install_all_mysql.sql`：如果以后想手工导入到另一套 MySQL 服务，可继续使用。
 
 ## 数据真实性说明
 
-- 2026-06-27 的主要日报值来自用户提供 Excel。
-- 为了验证跨日时间范围、SUM/COUNT 聚合等功能，部分脚本加入了 2026-06-25～26 的演示记录。
+- 2026-06-27 的主要日报值来自用户提供 Excel；
+- 2026-06-25～26 的部分记录用于测试跨日和聚合；
 - `maintenance_order` 工单明细属于演示数据。
 
 演示数据只用于软件功能验证，不代表真实生产业务记录。
