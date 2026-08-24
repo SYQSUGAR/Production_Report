@@ -11,6 +11,9 @@ class DbHandler:
 
     def connect(self, config: DbConfig, config_key: str = "default") -> bool:
         try:
+            # 重连前先释放旧连接，避免切换数据库配置后仍使用旧句柄。
+            self.disconnect(config_key)
+
             if config.db_type == "mysql":
                 import pymysql
                 conn = pymysql.connect(
@@ -25,6 +28,12 @@ class DbHandler:
                     f"SERVER={config.host},{config.port};DATABASE={config.database};"
                     f"UID={config.user};PWD={config.password};"
                 )
+            elif config.db_type == "sqlite":
+                import sqlite3
+                if not config.database:
+                    return False
+                conn = sqlite3.connect(config.database)
+                conn.row_factory = sqlite3.Row
             else:
                 print(f"不支持的数据库类型: {config.db_type}")
                 return False
@@ -77,7 +86,22 @@ class DbHandler:
         cursor = None
         try:
             cursor = conn.cursor()
-            if "pymysql" in type(conn).__module__.lower():
+            module = type(conn).__module__.lower()
+
+            if "sqlite3" in module:
+                metadata: dict[str, list[str]] = {}
+                cursor.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                )
+                tables = [str(row[0]) for row in cursor.fetchall()]
+                for table in tables:
+                    safe_table = table.replace("'", "''")
+                    cursor.execute(f"PRAGMA table_info('{safe_table}')")
+                    metadata[table] = [str(row[1]) for row in cursor.fetchall()]
+                return metadata
+
+            if "pymysql" in module:
                 cursor.execute(
                     "SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
                     "WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME, ORDINAL_POSITION"
