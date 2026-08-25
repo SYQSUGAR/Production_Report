@@ -91,7 +91,6 @@ try {
         if ($occupied) {
             throw "Port $DbPort is already occupied by PID $($occupied.OwningProcess). For safety, nothing was killed."
         }
-
         Write-Host "[2/3] Starting dedicated MySQL on 127.0.0.1:$DbPort..."
         $args = @(
             '--no-defaults',
@@ -111,37 +110,49 @@ try {
         throw "MySQL did not become ready. Check: $LogFile"
     }
 
-    Write-Host '[3/3] Checking unified reference database schema...'
+    Write-Host '[3/3] Checking reference database schema and real PLC configuration...'
     $tcpArgs = Get-MySqlTcpArgs
     $dbExists = & $mysql @tcpArgs -N -B -e "SHOW DATABASES LIKE 'production_report_demo';" 2>$null
     $tableCount = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='production_report_demo';" 2>$null
     $statusColumnCount = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='production_report_demo' AND TABLE_NAME='equipment_status';" 2>$null
     $statusRequiredColumns = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='production_report_demo' AND TABLE_NAME='equipment_status' AND COLUMN_NAME IN ('equipment_id','record_time','temperature_c');" 2>$null
+    $plcColumnCount = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='production_report_demo' AND TABLE_NAME='plc_config_modbus';" 2>$null
     $hourlyRows = ''
+    $plcRows = ''
     if ($dbExists -eq 'production_report_demo') {
         $hourlyRows = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM production_report_demo.equipment_status WHERE equipment_id='GL-03';" 2>$null
+        $plcTableExists = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='production_report_demo' AND TABLE_NAME='plc_config_modbus';" 2>$null
+        if ([string]$plcTableExists -eq '1') {
+            $plcRows = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM production_report_demo.plc_config_modbus;" 2>$null
+        }
     }
 
     $needsImport = ($dbExists -ne 'production_report_demo') -or
-                   ([int]$tableCount -lt 9) -or
+                   ([int]$tableCount -lt 10) -or
                    ([string]$statusColumnCount -ne '3') -or
                    ([string]$statusRequiredColumns -ne '3') -or
-                   ([string]$hourlyRows -ne '120')
+                   ([string]$hourlyRows -ne '120') -or
+                   ([string]$plcColumnCount -ne '14') -or
+                   ([string]$plcRows -ne '120')
 
     if ($needsImport) {
-        Write-Host '      Initializing/upgrading unified reference database...'
+        Write-Host '      Initializing/upgrading reference database...'
         $scripts = @(
             'reference_database\01_basic_data.sql',
             'reference_database\02_energy_data.sql',
             'reference_database\03_operation_data.sql',
             'reference_database\04_maintenance_data.sql',
             'reference_database\07_unified_reference_database.sql',
+            'reference_database\08a_plc_config_modbus_schema.sql',
+            'reference_database\08b_plc_config_modbus_data_1.sql',
+            'reference_database\08c_plc_config_modbus_data_2.sql',
+            'reference_database\08d_plc_config_modbus_data_3.sql',
             'reference_database\06_grant_reference_user.sql'
         )
         foreach ($relative in $scripts) { Invoke-SqlFile $mysql $relative }
-        Write-Host '      Unified reference database initialized/upgraded successfully.'
+        Write-Host '      Reference database and PLC configuration imported successfully.'
     } else {
-        Write-Host '      Current unified database schema found. No re-import needed.'
+        Write-Host '      Current database schema and PLC configuration are complete.'
     }
 
     $currentPid = ''
@@ -151,18 +162,20 @@ try {
 
     Write-Host ''
     Write-Host '============================================================' -ForegroundColor Green
-    Write-Host 'Reference database is running in the background.' -ForegroundColor Green
+    Write-Host 'Reference database server is running in the background.' -ForegroundColor Green
     Write-Host 'Host     : 127.0.0.1'
     Write-Host "Port     : $DbPort"
     Write-Host 'User     : report_user'
     Write-Host 'Password : report123'
-    Write-Host 'Database : production_report_demo'
+    Write-Host 'Available project database: production_report_demo'
+    Write-Host 'Real table: production_report_demo.plc_config_modbus (120 rows)'
     if ($currentPid) { Write-Host "PID      : $currentPid" }
     Write-Host ''
-    Write-Host 'Use this single database name in the PyQt connection dialog.' -ForegroundColor Yellow
-    Write-Host 'When finished, run stop_all.bat to stop this database.' -ForegroundColor Yellow
+    Write-Host 'In PyQt: configure the server first, then open Project Database Management.' -ForegroundColor Yellow
+    Write-Host 'Select production_report_demo there; tables and columns will be loaded automatically.' -ForegroundColor Yellow
+    Write-Host 'When finished, run stop_all.bat to stop this database server.' -ForegroundColor Yellow
     Write-Host '============================================================' -ForegroundColor Green
-    Start-Sleep -Seconds 3
+    Start-Sleep -Seconds 5
     exit 0
 }
 catch {
