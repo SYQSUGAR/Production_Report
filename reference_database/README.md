@@ -1,10 +1,6 @@
-# 参考数据库（仅用于验证）
+# 参考数据库与数据库连接设计
 
-当前参考环境统一使用一个项目数据库：
-
-```text
-production_report_demo
-```
+## 本地测试数据库
 
 MySQL 程序位置：
 
@@ -19,7 +15,6 @@ D:\3SoftWare\mysql
 端口：3307
 用户名：report_user
 密码：report123
-数据库名：production_report_demo
 字符集：utf8mb4
 ```
 
@@ -29,13 +24,72 @@ D:\3SoftWare\mysql
 D:\3SoftWare\mysql\production_report_demo\data
 ```
 
-双击仓库根目录的 `start_all.bat` 只启动数据库；程序 `main.py` 由用户自己的 Anaconda/IDE 环境启动。需要停止数据库时双击 `stop_all.bat`。
+双击仓库根目录的 `start_all.bat` 只启动/升级数据库服务器，不启动 Python 或 PyQt。程序由用户自己的 Anaconda/IDE 环境运行。需要停止数据库时双击 `stop_all.bat`。
 
-## 为什么改成一个数据库
+本地测试服务器目前提供项目数据库：
 
-当前 PyQt 程序界面只有一个全局 `default` 数据库连接配置，因此参考环境也统一成一个项目数据库最合适。一个连接即可读取全部业务表，也方便直接 JOIN。
+```text
+production_report_demo
+```
 
-最终 `production_report_demo` 主要包含：
+## 程序数据库使用方式
+
+新版程序把“数据库服务器连接”和“本项目使用哪些数据库”分开。
+
+### 数据库服务器连接配置
+
+只保存：
+
+```text
+数据库类型
+主机地址
+端口
+用户名
+密码
+字符集
+```
+
+不再在服务器连接配置中填写数据库名。
+
+### 本项目数据库管理
+
+服务器连接成功后，通过：
+
+```text
+数据库 → 本项目数据库管理...
+```
+
+打开双列表数据库选择器：
+
+```text
+待添加数据库  →  已添加数据库
+待添加数据库  ←  已添加数据库
+全部→
+←全部
+```
+
+左右列表支持普通单选、Ctrl 多选和 Shift 连选；顶部搜索同时过滤两侧列表。右侧“已添加数据库”就是当前报表工程允许使用的数据范围。
+
+数据库范围保存后，程序立即读取所有已添加数据库中的：
+
+```text
+全部数据表
+全部数据表的全部字段
+```
+
+并缓存元数据。模板编辑右侧的数据库绑定按：
+
+```text
+数据库 → 数据表 → 字段
+```
+
+选择，不需要每次切换表时重新访问服务器。
+
+如果项目只启用一个数据库，条件构建生成的 SQL 可以使用普通表名；启用多个数据库时，内部绑定保存数据库身份并生成 `database.table`。跨库出现同名表时，界面使用类似 `equipment_info (production)` 的显示方式区分，内部仍保存独立的 database/table 身份。
+
+## production_report_demo 表
+
+基础验证表：
 
 ```text
 location
@@ -49,42 +103,58 @@ maintenance_daily
 maintenance_order
 ```
 
-01～04 SQL 仍作为模块化初始化脚本使用；`07_unified_reference_database.sql` 会把这些模块表汇总进 `production_report_demo`，随后删除初始化过程中产生的四个临时模块库。
-
-## 设备数据结构
-
-### equipment_info
-
-设备属性表，一台设备只保存一行：
+真实项目配置表：
 
 ```text
-equipment_id        设备ID/业务编号，例如 GL-03
-equipment_name      设备名称，例如 3#锅炉
-equipment_type      设备类型
-team_name           所属班组
-location_name       安装位置
-manufacturer        厂家
-model               型号
-rated_power_kw      额定功率
-install_date        安装日期
-enabled             是否启用
-remark              其他设备信息
+plc_config_modbus
 ```
 
-### equipment_status
+### plc_config_modbus
 
-设备状态表严格只有三列：
+该表来自用户提供的 `plc_config_modbus.sql`，不是演示生成数据。当前导入：
 
 ```text
-equipment_id        设备ID，关联 equipment_info.equipment_id
-record_time         记录时间，颗粒度 1 小时
-temperature_c       设备温度（°C）
+120 条真实 Modbus 点位配置
 ```
 
-主键：
+字段为：
 
 ```text
-(equipment_id, record_time)
+variable_id
+variable_name
+variable_en_name
+biz_type
+host
+port
+slave_id
+register_address
+is_active
+create_by
+create_time
+update_by
+update_time
+remark
+```
+
+为便于 GitHub 维护和 BAT 分步导入，原始脚本在仓库中拆成：
+
+```text
+08a_plc_config_modbus_schema.sql   表结构
+08b_plc_config_modbus_data_1.sql   数据 1/3
+08c_plc_config_modbus_data_2.sql   数据 2/3
+08d_plc_config_modbus_data_3.sql   数据 3/3
+```
+
+四个脚本合起来对应原始 SQL 的完整表结构和 120 条记录。
+
+## 设备验证数据
+
+`equipment_info` 保存设备属性，一台设备一行；`equipment_status` 严格只有：
+
+```text
+equipment_id
+record_time
+temperature_c
 ```
 
 状态时间范围：
@@ -95,53 +165,44 @@ temperature_c       设备温度（°C）
 2026-06-27 23:00:00
 ```
 
-每台设备：
-
-```text
-5 天 × 24 小时 = 120 条状态记录
-```
-
-查询设备名称与状态时通过 `equipment_id` JOIN：
-
-```sql
-SELECT
-    e.equipment_id,
-    e.equipment_name,
-    s.record_time,
-    s.temperature_c
-FROM equipment_info e
-JOIN equipment_status s
-  ON s.equipment_id = e.equipment_id
-WHERE e.equipment_id = 'GL-03'
-ORDER BY s.record_time;
-```
+每台设备 5 天 × 24 小时 = 120 条小时记录。
 
 ## 初始化脚本
 
 ```text
-01_basic_data.sql               基础资料模块
-02_energy_data.sql              能源数据模块
-03_operation_data.sql           设备属性与小时状态模块
-04_maintenance_data.sql         维修数据模块
-07_unified_reference_database.sql  汇总为 production_report_demo
-06_grant_reference_user.sql     创建/授权 report_user
-00_install_all_mysql.sql        手工一键执行上述流程
+01_basic_data.sql                  基础资料模块
+02_energy_data.sql                 能源数据模块
+03_operation_data.sql              设备属性与小时状态模块
+04_maintenance_data.sql            维修模块
+07_unified_reference_database.sql  汇总基础验证数据到 production_report_demo
+08a_plc_config_modbus_schema.sql   真实 Modbus 配置表结构
+08b_plc_config_modbus_data_1.sql   真实 Modbus 配置数据 1/3
+08c_plc_config_modbus_data_2.sql   真实 Modbus 配置数据 2/3
+08d_plc_config_modbus_data_3.sql   真实 Modbus 配置数据 3/3
+06_grant_reference_user.sql        创建/授权 report_user
+00_install_all_mysql.sql           手工一键执行完整流程
 ```
 
-`tools/local_launcher.ps1` 会自动检查统一库、表结构以及 `GL-03` 的 120 条小时记录。发现旧结构时会自动重新初始化并汇总。
-
-## 程序中的数据库配置保存
-
-程序的 `DbConfig` 会随模板序列化到 `db_configs`，并在关闭程序时保存到：
+`tools/local_launcher.ps1` 会检查：
 
 ```text
-~/.report_editor/last_session.json
+production_report_demo
+设备小时状态结构
+GL-03 的 120 条小时记录
+plc_config_modbus 的 14 个字段
+plc_config_modbus 的 120 条点位记录
 ```
 
-当前分支还增加了数据库连接配置回显与立即保存：点击配置窗口“确定”后会立即更新当前会话，再次打开配置窗口会显示上一次填写的 host、port、用户名、密码、数据库名和字符集。
+任一项缺失时自动执行最新初始化脚本。
 
-注意：现有设计中的数据库密码会以明文写入模板/会话 JSON。当前参考环境仅用于本机测试；正式环境后续应考虑 Windows Credential Manager、keyring 或其它安全凭据存储方式。
+## 配置持久化
 
-## 数据真实性说明
+数据库服务器配置和本项目已选择数据库会随模板/会话保存。数据库服务器配置窗口再次打开时会回显已经保存的连接信息；数据库范围发生修改后点击“确定”立即保存并加载所有表/字段。未保存的数据库范围在关闭选择窗口时会提示“保存 / 不保存 / 取消”。
 
-2026-06-27 日报相关业务值主要来源于用户提供的 Excel。为验证软件功能而增加的设备温度、厂家、型号、工单明细和跨时段记录均属于演示数据，不代表真实生产记录。
+当前密码仍随模板/会话 JSON 保存为明文；正式环境后续可再迁移到系统凭据存储。
+
+## 数据说明
+
+2026-06-27 日报相关验证业务值主要来自此前提供的日报 Excel；设备小时温度、部分厂家型号和测试工单属于验证数据。`plc_config_modbus` 的表结构和 120 条点位记录来自本次用户提供的真实项目 SQL。
+
+本次同时提供的 YAML 只用于确认项目环境，不纳入仓库数据库初始化脚本，也不复制其中与本程序数据库验证无关的外部服务配置或凭据。
