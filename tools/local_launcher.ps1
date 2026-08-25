@@ -111,35 +111,37 @@ try {
         throw "MySQL did not become ready. Check: $LogFile"
     }
 
-    Write-Host '[3/3] Checking reference database schema...'
+    Write-Host '[3/3] Checking unified reference database schema...'
     $tcpArgs = Get-MySqlTcpArgs
-    $basicExists = & $mysql @tcpArgs -N -B -e "SHOW DATABASES LIKE 'production_basic_demo';" 2>$null
-    $statusTableExists = & $mysql @tcpArgs -N -B -e "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='production_operation_demo' AND TABLE_NAME='equipment_status';" 2>$null
-    $equipmentIdType = & $mysql @tcpArgs -N -B -e "SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='production_operation_demo' AND TABLE_NAME='equipment_info' AND COLUMN_NAME='equipment_id';" 2>$null
-    $statusColumnCount = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='production_operation_demo' AND TABLE_NAME='equipment_status';" 2>$null
-    $statusRequiredColumns = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='production_operation_demo' AND TABLE_NAME='equipment_status' AND COLUMN_NAME IN ('equipment_id','record_time','temperature_c');" 2>$null
-    $hourlyRows = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM production_operation_demo.equipment_status WHERE equipment_id='GL-03';" 2>$null
+    $dbExists = & $mysql @tcpArgs -N -B -e "SHOW DATABASES LIKE 'production_report_demo';" 2>$null
+    $tableCount = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='production_report_demo';" 2>$null
+    $statusColumnCount = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='production_report_demo' AND TABLE_NAME='equipment_status';" 2>$null
+    $statusRequiredColumns = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='production_report_demo' AND TABLE_NAME='equipment_status' AND COLUMN_NAME IN ('equipment_id','record_time','temperature_c');" 2>$null
+    $hourlyRows = ''
+    if ($dbExists -eq 'production_report_demo') {
+        $hourlyRows = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM production_report_demo.equipment_status WHERE equipment_id='GL-03';" 2>$null
+    }
 
-    $needsImport = ($basicExists -ne 'production_basic_demo') -or
-                   ($statusTableExists -ne 'equipment_status') -or
-                   ($equipmentIdType -ne 'varchar') -or
+    $needsImport = ($dbExists -ne 'production_report_demo') -or
+                   ([int]$tableCount -lt 9) -or
                    ([string]$statusColumnCount -ne '3') -or
                    ([string]$statusRequiredColumns -ne '3') -or
                    ([string]$hourlyRows -ne '120')
 
     if ($needsImport) {
-        Write-Host '      Initializing/upgrading reference database schema...'
+        Write-Host '      Initializing/upgrading unified reference database...'
         $scripts = @(
             'reference_database\01_basic_data.sql',
             'reference_database\02_energy_data.sql',
             'reference_database\03_operation_data.sql',
             'reference_database\04_maintenance_data.sql',
+            'reference_database\07_unified_reference_database.sql',
             'reference_database\06_grant_reference_user.sql'
         )
         foreach ($relative in $scripts) { Invoke-SqlFile $mysql $relative }
-        Write-Host '      Reference databases initialized/upgraded successfully.'
+        Write-Host '      Unified reference database initialized/upgraded successfully.'
     } else {
-        Write-Host '      Current reference database schema found. No re-import needed.'
+        Write-Host '      Current unified database schema found. No re-import needed.'
     }
 
     $currentPid = ''
@@ -154,15 +156,10 @@ try {
     Write-Host "Port     : $DbPort"
     Write-Host 'User     : report_user'
     Write-Host 'Password : report123'
+    Write-Host 'Database : production_report_demo'
     if ($currentPid) { Write-Host "PID      : $currentPid" }
-    Write-Host 'Databases:'
-    Write-Host '  production_basic_demo'
-    Write-Host '  production_energy_demo'
-    Write-Host '  production_operation_demo'
-    Write-Host '  production_maintenance_demo'
     Write-Host ''
-    Write-Host 'This launcher will now close. MySQL will KEEP running.' -ForegroundColor Yellow
-    Write-Host 'Start main.py yourself from your Anaconda/IDE environment.' -ForegroundColor Yellow
+    Write-Host 'Use this single database name in the PyQt connection dialog.' -ForegroundColor Yellow
     Write-Host 'When finished, run stop_all.bat to stop this database.' -ForegroundColor Yellow
     Write-Host '============================================================' -ForegroundColor Green
     Start-Sleep -Seconds 3
