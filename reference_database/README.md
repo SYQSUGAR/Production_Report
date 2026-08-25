@@ -23,19 +23,11 @@ stop_all.bat
 start_all.bat
 ```
 
-启动器会：
-
-1. 检查 Python；
-2. 在 `D:\3SoftWare\mysql` 下寻找 `mysqld.exe`、`mysql.exe`、`mysqladmin.exe`；
-3. 为本项目创建独立数据目录 `D:\3SoftWare\mysql\production_report_demo\data`；
-4. 使用固定端口 `127.0.0.1:3307` 启动独立 MySQL 测试实例，不影响电脑上可能已经运行的 3306 MySQL 服务；
-5. 第一次启动时自动执行 `01`～`04` 和 `06` SQL 脚本，创建测试库、表和数据；
-6. 启动 `main.py`；
-7. 正常关闭 PyQt 程序后，自动正常关闭该测试 MySQL 实例，但保留数据目录。
+启动器会检查 Python 和 MySQL，在 `D:\3SoftWare\mysql\production_report_demo\data` 使用独立数据目录，以 `127.0.0.1:3307` 启动本项目专用 MySQL。第一次启动或检测到旧版参考数据库结构时，会自动执行最新 SQL 脚本进行初始化/升级，然后启动 `main.py`。正常关闭 PyQt 后，启动器会自动关闭该测试 MySQL，但保留数据目录。
 
 ## 防止重复启动
 
-该启动器使用固定：
+固定配置：
 
 ```text
 端口：3307
@@ -44,25 +36,17 @@ MySQL PID：D:\3SoftWare\mysql\production_report_demo\run\mysqld.pid
 数据目录：D:\3SoftWare\mysql\production_report_demo\data
 ```
 
-因此再次双击 `start_all.bat` 时：
-
-- 如果 PyQt 程序已经在运行，不会再打开第二个程序；
-- 如果本项目 MySQL 已经在运行，会复用原实例，不会启动第二个数据库；
-- 如果 3307 被未知程序占用，会直接报错并退出，不会误杀未知数据库。
+因此再次运行 `start_all.bat` 时，如果 PyQt 已经运行，不会打开第二个程序；如果本项目 MySQL 已经运行，会复用原实例；如果 3307 被未知程序占用，会报错退出，不会误杀未知进程。
 
 ## 一键停止
 
-正常情况下直接关闭 PyQt 窗口即可，`start_all.bat` 会随后自动关闭测试数据库。
-
-如果程序异常、BAT 窗口被关闭，或者想手动全部停止，双击：
+正常情况下直接关闭 PyQt 窗口即可。异常情况下双击：
 
 ```text
 stop_all.bat
 ```
 
-它会先按 `app.pid` 停止本项目 PyQt 程序，再使用 `mysqladmin shutdown` 正常关闭 3307 测试库；只有正常关闭失败时，才会根据本项目自己的 `mysqld.pid` 强制结束该 PID。
-
-**脚本不会使用 `taskkill /IM mysqld.exe`，因此不会把电脑上其他 MySQL 服务一起杀掉。**
+脚本只根据本项目记录的 PID 停止 PyQt 和 3307 测试 MySQL，不使用 `taskkill /IM mysqld.exe`，不会影响电脑上其他 MySQL 服务。
 
 ## 程序连接信息
 
@@ -75,7 +59,7 @@ stop_all.bat
 字符集：utf8mb4
 ```
 
-分别建立 4 个数据库连接时，只修改数据库名：
+数据库名：
 
 ```text
 production_basic_demo
@@ -86,28 +70,29 @@ production_maintenance_demo
 
 ## 数据保存方式
 
-真正的数据不在 `.sql` 文件中持续运行，而保存在：
+真正的数据保存在：
 
 ```text
 D:\3SoftWare\mysql\production_report_demo\data
 ```
 
-`.sql` 文件主要用于第一次初始化和以后需要重新建立测试数据时使用。停止数据库或关闭电脑不会删除数据，下次启动仍读取原来的数据目录。
+`.sql` 文件主要用于首次初始化、结构升级和重新建立测试数据。
 
 ## MySQL 验证脚本
 
 ### 01_basic_data.sql
 
-创建 `production_basic_demo`，主要包含：
+创建 `production_basic_demo`，主要保存公共基础资料：
 
-- `location`
-- `team`
-- `equipment`
-- `meter_point`
+- `location`：区域/楼宇/站房；
+- `team`：班组；
+- `meter_point`：水、电、气、热水计量点。
+
+设备主数据不再重复保存在这里，统一放到设备运行库。
 
 ### 02_energy_data.sql
 
-创建 `production_energy_demo`，主要包含：
+创建 `production_energy_demo`：
 
 - `utility_metric`
 - `utility_daily`
@@ -116,42 +101,86 @@ D:\3SoftWare\mysql\production_report_demo\data
 
 ### 03_operation_data.sql
 
-创建 `production_operation_demo`，主要包含：
+创建 `production_operation_demo`，核心采用标准“主数据 + 时序状态”结构：
 
-- `equipment_runtime`
-- `temperature_record`
+```text
+equipment_info       设备基本信息，一台设备只有一行
+    equipment_id PK
+    equipment_code
+    equipment_name
+    equipment_type
+    team_name
+    location_name
+    manufacturer
+    model
+    rated_power_kw
+    install_date
+    ...
 
-包含 `record_time` 和 `report_date` 两类时间字段。
+        1
+        │ equipment_id
+        │
+        N
+
+equipment_status     设备状态/历史数据，同一设备可有很多行
+    status_id PK
+    equipment_id FK
+    record_time
+    report_date
+    pressure_mpa
+    supply_temp_c
+    return_temp_c
+    runtime_hours
+    month_runtime_hours
+    year_runtime_hours
+    running_status
+```
+
+例如 `3#锅炉` 的名称、类型、班组等只在 `equipment_info` 保存一次；2026-06-25、26、27 的压力、温度、运行时间分别作为多条 `equipment_status` 记录，并使用同一个 `equipment_id` 关联。
+
+因此查询“3#锅炉在 2026-06-27 的压力”时，可以真实验证 JOIN：
+
+```sql
+SELECT e.equipment_name, s.record_time, s.pressure_mpa
+FROM equipment_info e
+JOIN equipment_status s ON s.equipment_id = e.equipment_id
+WHERE e.equipment_code = 'GL-03'
+  AND s.record_time >= '2026-06-27 00:00:00'
+  AND s.record_time < '2026-06-28 00:00:00';
+```
+
+另外保留 `temperature_record` 用于区域温度时序数据测试。
 
 ### 04_maintenance_data.sql
 
-创建 `production_maintenance_demo`，主要包含：
+创建 `production_maintenance_demo`：
 
 - `maintenance_daily`
 - `maintenance_order`
 
 ### 06_grant_reference_user.sql
 
-创建/更新本测试实例专用账号：
+创建/更新测试账号：
 
 ```text
 report_user / report123
 ```
 
-并授予上述四个测试库访问权限。
+并授予四个测试库访问权限。
 
 ## 其他保留脚本
 
-`mysql_reference.sql`：单数据库快速验证版本，创建 `production_report_demo`。
+`mysql_reference.sql`：旧的单数据库快速验证版本。
 
-`05_sqlserver_reference.sql`：SQL Server 验证版本，创建 `production_sqlserver_demo`。
+`05_sqlserver_reference.sql`：SQL Server 验证版本。
 
-`00_install_all_mysql.sql`：如果以后想手工导入到另一套 MySQL 服务，可继续使用。
+`00_install_all_mysql.sql`：手工导入多库环境时使用。
 
 ## 数据真实性说明
 
 - 2026-06-27 的主要日报值来自用户提供 Excel；
-- 2026-06-25～26 的部分记录用于测试跨日和聚合；
+- 2026-06-25～26 的部分记录用于测试跨日、JOIN 和聚合；
+- 设备厂家、型号等缺少原始来源的字段属于明确的演示基础信息；
 - `maintenance_order` 工单明细属于演示数据。
 
 演示数据只用于软件功能验证，不代表真实生产业务记录。
