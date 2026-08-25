@@ -1,9 +1,9 @@
-"""最终修正 JOIN 整组控制位置、紧凑布局与控件生命周期。"""
+"""最终修正 JOIN 整组控制位置、紧凑布局、控件生命周期与搜索候选关闭行为。"""
 
 
 def install_database_binding_v6_group_controls():
     import ui.editor_side_panels as esp
-    from PyQt6.QtCore import Qt
+    from PyQt6.QtCore import Qt, QEvent, QObject, QTimer
     from PyQt6.QtWidgets import QVBoxLayout
 
     if getattr(esp, "_database_binding_v6_group_controls_installed", False):
@@ -17,6 +17,72 @@ def install_database_binding_v6_group_controls():
     previous_remove_join = cls._remove_join_v2
     previous_load = cls._load_db_binding
     previous_join_changed = cls._on_join_changed_v2
+
+    class _CloseSearchPopupFilter(QObject):
+        """补全候选被鼠标/键盘选中后立即收起，不影响下次再次点击输入框。"""
+
+        def __init__(self, combo):
+            super().__init__(combo)
+            self.combo = combo
+
+        def close_popup(self):
+            combo = self.combo
+            try:
+                combo.hidePopup()
+            except RuntimeError:
+                return
+            comp = combo.completer()
+            if comp is not None:
+                popup = comp.popup()
+                if popup is not None:
+                    popup.hide()
+
+        def eventFilter(self, watched, event):
+            etype = event.type()
+            if etype == QEvent.Type.MouseButtonRelease:
+                # 让候选项先完成 activated/currentText 更新，再关闭弹层。
+                QTimer.singleShot(0, self.close_popup)
+            elif etype == QEvent.Type.KeyPress and event.key() in (
+                Qt.Key.Key_Return,
+                Qt.Key.Key_Enter,
+                Qt.Key.Key_Tab,
+            ):
+                QTimer.singleShot(0, self.close_popup)
+            return False
+
+    def _ensure_choice_closes(combo):
+        """统一所有“可输入 + 可搜索”QComboBox 的选择后关闭行为。"""
+        if combo is None or not combo.isEditable():
+            return
+
+        # completer 在 clear()/addItems() 后可能被 Qt/V2 逻辑重建，不能只记 combo 已处理。
+        comp = combo.completer()
+        comp_id = id(comp) if comp is not None else None
+        old_id = combo.property("v6_close_completer_id")
+        if old_id == comp_id and getattr(combo, "_v6_close_filter", None) is not None:
+            return
+
+        filt = _CloseSearchPopupFilter(combo)
+        combo._v6_close_filter = filt
+        combo.setProperty("v6_close_completer_id", comp_id)
+
+        def close_later(*_args, c=combo, f=filt):
+            QTimer.singleShot(0, f.close_popup)
+
+        # 普通下拉选择和补全候选选择都关闭。
+        combo.activated.connect(close_later)
+        edit = combo.lineEdit()
+        if edit is not None:
+            edit.returnPressed.connect(close_later)
+
+        if comp is not None:
+            comp.activated.connect(close_later)
+            popup = comp.popup()
+            if popup is not None:
+                popup.installEventFilter(filt)
+                viewport = popup.viewport()
+                if viewport is not None:
+                    viewport.installEventFilter(filt)
 
     def _compact_label(label, text):
         if label is None:
@@ -48,6 +114,10 @@ def install_database_binding_v6_group_controls():
             frame.layout().setContentsMargins(3, 4, 3, 4)
             frame.layout().setSpacing(3)
 
+        # 表名输入框也使用完全相同的“选中即关闭候选”规则。
+        _ensure_choice_closes(row.get("left_table_v3"))
+        _ensure_choice_closes(row.get("table"))
+
         for cond in list(row.get("conditions", []) or []):
             _compact_label(cond.get("left_label_v3"), "左表字段:")
             _compact_label(cond.get("right_label_v3"), "右表字段:")
@@ -56,6 +126,9 @@ def install_database_binding_v6_group_controls():
             if widget is not None and widget.layout() is not None:
                 widget.layout().setContentsMargins(0, 0, 0, 0)
                 widget.layout().setSpacing(2)
+            # 这里就是截图中左/右表字段的补全候选。
+            _ensure_choice_closes(cond.get("left"))
+            _ensure_choice_closes(cond.get("right"))
 
     def _install_external_controls(panel, row):
         """复用 V2 原始 ↑ ↓ ×，只移动位置，绝不销毁按钮对象。"""
@@ -125,6 +198,19 @@ def install_database_binding_v6_group_controls():
             add_join.setEnabled(True)
             add_join.setToolTip("添加第一组表关联")
 
+    def _wire_all_searchable_inputs(panel):
+        """数据库绑定区域所有可输入下拉框统一应用关闭规则。"""
+        _ensure_choice_closes(getattr(panel, "_cmb_table", None))
+        _ensure_choice_closes(getattr(panel, "_cmb_field", None))
+        for fr in list(getattr(panel, "_filter_rows", []) or []):
+            _ensure_choice_closes(fr.get("field_combo"))
+        for row in list(getattr(panel, "_join_rows", []) or []):
+            _ensure_choice_closes(row.get("left_table_v3"))
+            _ensure_choice_closes(row.get("table"))
+            for cond in list(row.get("conditions", []) or []):
+                _ensure_choice_closes(cond.get("left"))
+                _ensure_choice_closes(cond.get("right"))
+
     def _refresh(panel):
         group = getattr(panel, "_join_group_v2", None)
         if group is not None and group.isCheckable():
@@ -136,6 +222,7 @@ def install_database_binding_v6_group_controls():
             _rename_and_compact_row(panel, row)
             _install_external_controls(panel, row)
         _refresh_buttons(panel)
+        _wire_all_searchable_inputs(panel)
 
     def panel_init(self, *args, **kwargs):
         previous_init(self, *args, **kwargs)
