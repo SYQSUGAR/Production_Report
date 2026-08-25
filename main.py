@@ -16,6 +16,7 @@ from ui.database_binding_v2_guard import install_database_binding_v2_guard
 from ui.database_binding_v2_finish import install_database_binding_v2_finish
 from ui.database_binding_v3_final import install_database_binding_v3_final
 from ui.database_binding_v4_refine import install_database_binding_v4_refine
+from ui.database_binding_v5_visual_hierarchy import install_database_binding_v5_visual_hierarchy
 
 
 _APP_DATA_DIR = os.path.join(os.path.expanduser("~"), ".report_editor")
@@ -78,13 +79,14 @@ def main():
     app.setFont(font)
 
     try:
-        # 安装顺序：服务器/数据库范围 -> V2 多 JOIN 基础 -> 构造保护/折叠 -> 最终交互 -> 交互收尾。
+        # 安装顺序：服务器/数据库范围 -> V2 多 JOIN 基础 -> 构造保护/折叠 -> 最终交互 -> 交互收尾 -> 视觉层级收尾。
         install_db_connection_patch()
         install_database_binding_v2()
         install_database_binding_v2_guard()
         install_database_binding_v2_finish()
         install_database_binding_v3_final()
         install_database_binding_v4_refine()
+        install_database_binding_v5_visual_hierarchy()
         window = WorkspaceWindow()
         window.show()
         return app.exec()
