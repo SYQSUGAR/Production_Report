@@ -30,9 +30,14 @@ function Test-ProcessId([string]$PidText, [string]$ExpectedName = '') {
     } catch { return $false }
 }
 
+function Get-MySqlTcpArgs {
+    return @('--no-defaults','--protocol=tcp','--host=127.0.0.1',"--port=$DbPort",'--user=root')
+}
+
 function Wait-MySql([string]$MySqlAdmin) {
+    $tcpArgs = Get-MySqlTcpArgs
     for ($i = 0; $i -lt 60; $i++) {
-        & $MySqlAdmin --no-defaults --protocol=tcp -h127.0.0.1 -P$DbPort -uroot ping --silent 2>$null | Out-Null
+        & $MySqlAdmin @tcpArgs ping --silent 2>$null | Out-Null
         if ($LASTEXITCODE -eq 0) { return $true }
         Start-Sleep -Seconds 1
     }
@@ -40,7 +45,8 @@ function Wait-MySql([string]$MySqlAdmin) {
 }
 
 function Stop-LocalMySql([string]$MySqlAdmin) {
-    & $MySqlAdmin --no-defaults --protocol=tcp -h127.0.0.1 -P$DbPort -uroot shutdown 2>$null | Out-Null
+    $tcpArgs = Get-MySqlTcpArgs
+    & $MySqlAdmin @tcpArgs shutdown 2>$null | Out-Null
     for ($i = 0; $i -lt 15; $i++) {
         if (-not (Test-Path $PidFile)) { return $true }
         $pidText = (Get-Content $PidFile -Raw -ErrorAction SilentlyContinue).Trim()
@@ -51,6 +57,15 @@ function Stop-LocalMySql([string]$MySqlAdmin) {
         Start-Sleep -Seconds 1
     }
     return $false
+}
+
+function Invoke-SqlFile([string]$MySql, [string]$RelativePath) {
+    $path = Join-Path $ProjectDir $RelativePath
+    if (-not (Test-Path $path)) { throw "Missing SQL file: $RelativePath" }
+    $portArg = "--port=$DbPort"
+    $cmd = '"' + $MySql + '" --no-defaults --protocol=tcp --host=127.0.0.1 ' + $portArg + ' --user=root < "' + $path + '"'
+    cmd.exe /d /c $cmd
+    if ($LASTEXITCODE -ne 0) { throw "Failed to import: $RelativePath" }
 }
 
 try {
@@ -119,10 +134,14 @@ try {
 
     if (-not (Wait-MySql $mysqladmin)) { throw "MySQL did not become ready. Check: $LogFile" }
 
-    Write-Host '[3/4] Checking reference databases...'
-    $exists = & $mysql --no-defaults --protocol=tcp -h127.0.0.1 -P$DbPort -uroot -N -B -e "SHOW DATABASES LIKE 'production_basic_demo';" 2>$null
-    if ($exists -notcontains 'production_basic_demo' -and $exists -ne 'production_basic_demo') {
-        Write-Host '      First database start: importing SQL reference data...'
+    Write-Host '[3/4] Checking reference database schema...'
+    $tcpArgs = Get-MySqlTcpArgs
+    $basicExists = & $mysql @tcpArgs -N -B -e "SHOW DATABASES LIKE 'production_basic_demo';" 2>$null
+    $statusTableExists = & $mysql @tcpArgs -N -B -e "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='production_operation_demo' AND TABLE_NAME='equipment_status';" 2>$null
+
+    $needsImport = ($basicExists -ne 'production_basic_demo') -or ($statusTableExists -ne 'equipment_status')
+    if ($needsImport) {
+        Write-Host '      Initializing/upgrading reference database schema...'
         $scripts = @(
             'reference_database\01_basic_data.sql',
             'reference_database\02_energy_data.sql',
@@ -130,16 +149,10 @@ try {
             'reference_database\04_maintenance_data.sql',
             'reference_database\06_grant_reference_user.sql'
         )
-        foreach ($relative in $scripts) {
-            $path = Join-Path $ProjectDir $relative
-            if (-not (Test-Path $path)) { throw "Missing SQL file: $relative" }
-            $cmd = '"' + $mysql + '" --no-defaults --protocol=tcp -h127.0.0.1 -P' + $DbPort + ' -uroot < "' + $path + '"'
-            cmd.exe /d /c $cmd
-            if ($LASTEXITCODE -ne 0) { throw "Failed to import: $relative" }
-        }
-        Write-Host '      Reference databases imported successfully.'
+        foreach ($relative in $scripts) { Invoke-SqlFile $mysql $relative }
+        Write-Host '      Reference databases initialized/upgraded successfully.'
     } else {
-        Write-Host '      Existing reference databases found. No re-import needed.'
+        Write-Host '      Current reference database schema found. No re-import needed.'
     }
 
     Write-Host ''
