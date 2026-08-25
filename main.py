@@ -11,6 +11,7 @@ from PyQt6.QtGui import QFont
 
 from ui.workspace_window import WorkspaceWindow
 from ui.db_connection_patch import install_db_connection_patch
+from ui.database_binding_v2 import install_database_binding_v2
 
 
 _APP_DATA_DIR = os.path.join(os.path.expanduser("~"), ".report_editor")
@@ -44,11 +45,7 @@ def _exception_hook(exc_type, exc_value, exc_tb):
 
 
 def _install_chinese_qt_translation(app: QApplication):
-    """统一把 Qt 自带按钮/系统对话框切换为中文。
-
-    这样 QMessageBox 的 Save/Discard/Cancel/Yes/No/OK 等标准按钮不会再
-    因操作系统或 Qt 默认语言而显示英文。翻译文件缺失时应用仍可正常启动。
-    """
+    """统一把 Qt 自带按钮/系统对话框切换为中文。"""
     QLocale.setDefault(QLocale(QLocale.Language.Chinese, QLocale.Country.China))
     translations_path = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
 
@@ -59,7 +56,6 @@ def _install_chinese_qt_translation(app: QApplication):
             app.installTranslator(translator)
             translators.append(translator)
 
-    # QTranslator 必须保持引用，否则会被回收而失效。
     app._qt_zh_translators = translators
 
 
@@ -78,7 +74,9 @@ def main():
     app.setFont(font)
 
     try:
+        # 先安装服务器连接/多数据库范围，再叠加多 JOIN 与预览界面。
         install_db_connection_patch()
+        install_database_binding_v2()
         window = WorkspaceWindow()
         window.show()
         return app.exec()
