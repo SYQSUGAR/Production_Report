@@ -10,6 +10,7 @@ $LogDir = Join-Path $InstanceRoot 'logs'
 $PidFile = Join-Path $RunDir 'mysqld.pid'
 $AppPidFile = Join-Path $RunDir 'app.pid'
 $LogFile = Join-Path $LogDir 'mysql-error.log'
+$CrashLog = Join-Path $HOME '.report_editor\crash.log'
 
 function Find-Exe([string]$Name) {
     $direct = Join-Path $MySqlHome ('bin\' + $Name)
@@ -66,6 +67,24 @@ function Invoke-SqlFile([string]$MySql, [string]$RelativePath) {
     $cmd = '"' + $MySql + '" --no-defaults --protocol=tcp --host=127.0.0.1 ' + $portArg + ' --user=root --default-character-set=utf8mb4 < "' + $path + '"'
     cmd.exe /d /c $cmd
     if ($LASTEXITCODE -ne 0) { throw "Failed to import: $RelativePath" }
+}
+
+function Show-AppFailure([int]$ExitCode, [double]$ElapsedSeconds) {
+    Write-Host ''
+    Write-Host '============================================================' -ForegroundColor Red
+    Write-Host 'PyQt application exited unexpectedly.' -ForegroundColor Red
+    Write-Host "Exit code : $ExitCode" -ForegroundColor Red
+    Write-Host ('Run time  : {0:N1} seconds' -f $ElapsedSeconds) -ForegroundColor Red
+    if (Test-Path $CrashLog) {
+        Write-Host "Crash log : $CrashLog" -ForegroundColor Yellow
+        Write-Host '---------------- last crash log lines ----------------' -ForegroundColor Yellow
+        Get-Content $CrashLog -Tail 60 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+        Write-Host '--------------------------------------------------------' -ForegroundColor Yellow
+    } else {
+        Write-Host "No crash log found at: $CrashLog" -ForegroundColor Yellow
+    }
+    Write-Host 'The launcher will remain open so the error can be read.' -ForegroundColor Yellow
+    Write-Host '============================================================' -ForegroundColor Red
 }
 
 try {
@@ -138,8 +157,9 @@ try {
     $tcpArgs = Get-MySqlTcpArgs
     $basicExists = & $mysql @tcpArgs -N -B -e "SHOW DATABASES LIKE 'production_basic_demo';" 2>$null
     $statusTableExists = & $mysql @tcpArgs -N -B -e "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='production_operation_demo' AND TABLE_NAME='equipment_status';" 2>$null
+    $equipmentIdType = & $mysql @tcpArgs -N -B -e "SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='production_operation_demo' AND TABLE_NAME='equipment_info' AND COLUMN_NAME='equipment_id';" 2>$null
 
-    $needsImport = ($basicExists -ne 'production_basic_demo') -or ($statusTableExists -ne 'equipment_status')
+    $needsImport = ($basicExists -ne 'production_basic_demo') -or ($statusTableExists -ne 'equipment_status') -or ($equipmentIdType -ne 'varchar')
     if ($needsImport) {
         Write-Host '      Initializing/upgrading reference database schema...'
         $scripts = @(
@@ -166,11 +186,18 @@ try {
     Write-Host '[4/4] Starting PyQt application...'
     Write-Host 'Close the PyQt window normally to stop this dedicated MySQL instance.'
 
+    $startedAt = Get-Date
     $app = Start-Process -FilePath $python -ArgumentList 'main.py' -WorkingDirectory $ProjectDir -PassThru
     Set-Content -Path $AppPidFile -Value $app.Id -Encoding ascii
     $app.WaitForExit()
     $appExit = $app.ExitCode
+    $elapsed = ((Get-Date) - $startedAt).TotalSeconds
     Remove-Item $AppPidFile -Force -ErrorAction SilentlyContinue
+
+    $suspiciousExit = ($appExit -ne 0) -or ($elapsed -lt 3)
+    if ($suspiciousExit) {
+        Show-AppFailure $appExit $elapsed
+    }
 
     Write-Host ''
     Write-Host 'Application closed. Stopping dedicated MySQL instance...'
@@ -179,6 +206,10 @@ try {
     } else {
         Write-Warning 'Normal shutdown did not finish. Run stop_all.bat to force-stop only this project instance.'
     }
+
+    if ($suspiciousExit) {
+        Read-Host 'Press Enter after you have copied or photographed the error above'
+    }
     exit $appExit
 }
 catch {
@@ -186,6 +217,9 @@ catch {
     Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
     Write-Host 'Startup failed. No unknown MySQL process was killed.'
     Write-Host 'If the dedicated test instance remains running, use stop_all.bat.'
+    if (Test-Path $CrashLog) {
+        Write-Host "Crash log: $CrashLog" -ForegroundColor Yellow
+    }
     Read-Host 'Press Enter to continue'
     exit 1
 }
