@@ -1,5 +1,6 @@
 -- 设备运行参考数据库（MySQL 8+）
--- 2026-06-27 核心数值来自日报；其余记录为时间筛选和聚合验证用演示数据。
+-- 设计原则：设备基本信息只保存一行；运行状态按 equipment_id + record_time 保存多条历史记录。
+-- 2026-06-27 核心数值来自用户提供日报；2026-06-25～26 为时间筛选和 JOIN 验证用演示数据。
 
 CREATE DATABASE IF NOT EXISTS production_operation_demo
   DEFAULT CHARACTER SET utf8mb4
@@ -7,14 +8,33 @@ CREATE DATABASE IF NOT EXISTS production_operation_demo
 USE production_operation_demo;
 
 DROP TABLE IF EXISTS temperature_record;
+DROP TABLE IF EXISTS equipment_status;
 DROP TABLE IF EXISTS equipment_runtime;
+DROP TABLE IF EXISTS equipment_info;
 
-CREATE TABLE equipment_runtime (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+CREATE TABLE equipment_info (
+  equipment_id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  equipment_code VARCHAR(32) NOT NULL UNIQUE,
+  equipment_name VARCHAR(100) NOT NULL,
+  equipment_type VARCHAR(32) NOT NULL,
+  team_name VARCHAR(100),
+  location_name VARCHAR(100),
+  manufacturer VARCHAR(100),
+  model VARCHAR(100),
+  rated_power_kw DECIMAL(12,2),
+  install_date DATE,
+  enabled TINYINT(1) NOT NULL DEFAULT 1,
+  remark VARCHAR(255),
+  KEY idx_equipment_type(equipment_type),
+  KEY idx_equipment_team(team_name),
+  KEY idx_equipment_location(location_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE equipment_status (
+  status_id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  equipment_id BIGINT NOT NULL,
   record_time DATETIME NOT NULL,
   report_date DATE NOT NULL,
-  team_name VARCHAR(100) NOT NULL,
-  equipment_name VARCHAR(100) NOT NULL,
   pressure_mpa DECIMAL(10,3),
   supply_temp_c DECIMAL(10,2),
   return_temp_c DECIMAL(10,2),
@@ -22,9 +42,13 @@ CREATE TABLE equipment_runtime (
   month_runtime_hours DECIMAL(12,2),
   year_runtime_hours DECIMAL(12,2),
   running_status VARCHAR(20) NOT NULL DEFAULT '停机',
-  KEY idx_record_time(record_time),
-  KEY idx_report_date(report_date),
-  KEY idx_team_equipment(team_name, equipment_name)
+  remark VARCHAR(255),
+  CONSTRAINT fk_equipment_status_equipment
+    FOREIGN KEY (equipment_id) REFERENCES equipment_info(equipment_id),
+  UNIQUE KEY uk_equipment_time(equipment_id, record_time),
+  KEY idx_status_record_time(record_time),
+  KEY idx_status_report_date(report_date),
+  KEY idx_status_equipment_date(equipment_id, report_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE temperature_record (
@@ -38,35 +62,69 @@ CREATE TABLE temperature_record (
   KEY idx_temp_location(location_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 演示数据：用于跨日/时间范围测试
-INSERT INTO equipment_runtime(record_time, report_date, team_name, equipment_name, pressure_mpa, supply_temp_c, return_temp_c, runtime_hours, month_runtime_hours, year_runtime_hours, running_status) VALUES
-('2026-06-25 08:00:00','2026-06-25','锅炉运行班','3#锅炉',0.30,69,59,4.2,2.77,131.17,'运行'),
-('2026-06-26 08:00:00','2026-06-26','锅炉运行班','3#锅炉',0.31,70,60,4.2,6.97,135.37,'运行');
+-- 设备基本信息：每台设备只保存一行。
+INSERT INTO equipment_info
+(equipment_code, equipment_name, equipment_type, team_name, location_name, manufacturer, model, rated_power_kw, install_date, remark) VALUES
+('GL-01','1#锅炉','锅炉','锅炉运行班','锅炉房','测试厂家A','GL-2800',2800,'2019-10-01','日报参考设备'),
+('GL-02','2#锅炉','锅炉','锅炉运行班','锅炉房','测试厂家A','GL-2800',2800,'2019-10-01','日报参考设备'),
+('GL-03','3#锅炉','锅炉','锅炉运行班','锅炉房','测试厂家A','GL-2800',2800,'2019-10-01','日报参考设备'),
+('GL-04','4#锅炉','锅炉','锅炉运行班','锅炉房','测试厂家A','GL-2800',2800,'2019-10-01','日报参考设备'),
+('KYL-ZL-01','1#机组','制冷机组','科研楼制冷班','长庆综合科研楼','测试厂家B','ZL-850',850,'2020-05-01','演示基础信息'),
+('KYL-ZL-02','2#机组','制冷机组','科研楼制冷班','长庆综合科研楼','测试厂家B','ZL-850',850,'2020-05-01','演示基础信息'),
+('KYL-ZL-03','3#机组','制冷机组','科研楼制冷班','长庆综合科研楼','测试厂家B','ZL-850',850,'2020-05-01','演示基础信息'),
+('DS-ZL-01','1#机组','制冷机组','大厦制冷班','长庆大厦','测试厂家C','ZL-900',900,'2020-06-01','演示基础信息'),
+('DS-ZL-02','2#机组','制冷机组','大厦制冷班','长庆大厦','测试厂家C','ZL-900',900,'2020-06-01','演示基础信息'),
+('MGL-ZL-01','1#机组','制冷机组','明光路制冷班','明光路办公区','测试厂家D','ZL-900',900,'2021-04-15','演示基础信息'),
+('MGL-ZL-02','2#机组','制冷机组','明光路制冷班','明光路办公区','测试厂家D','ZL-900',900,'2021-04-15','演示基础信息'),
+('MGL-ZL-03','3#机组','制冷机组','明光路制冷班','明光路办公区','测试厂家D','ZL-900',900,'2021-04-15','演示基础信息'),
+('MGL-ZL-04','4#机组','制冷机组','明光路制冷班','明光路办公区','测试厂家D','ZL-900',900,'2021-04-15','演示基础信息'),
+('MGL-ZL-05','5#机组','制冷机组','明光路制冷班','明光路办公区','测试厂家D','ZL-900',900,'2021-04-15','演示基础信息'),
+('MGL-ZL-06','6#机组','制冷机组','明光路制冷班','明光路办公区','测试厂家D','ZL-900',900,'2021-04-15','演示基础信息'),
+('MGL-ZL-07','7#机组','制冷机组','明光路制冷班','明光路办公区','测试厂家D','ZL-900',900,'2021-04-15','演示基础信息'),
+('MGL-ZL-08','8#机组','制冷机组','明光路制冷班','明光路办公区','测试厂家D','ZL-900',900,'2021-04-15','演示基础信息'),
+('MGL-ZL-09','9#机组','制冷机组','明光路制冷班','明光路办公区','测试厂家D','ZL-900',900,'2021-04-15','演示基础信息'),
+('MGL-ZL-10','10#机组','制冷机组','明光路制冷班','明光路办公区','测试厂家D','ZL-900',900,'2021-04-15','演示基础信息'),
+('MGL-ZL-11','11#机组','制冷机组','明光路制冷班','明光路办公区','测试厂家D','ZL-900',900,'2021-04-15','演示基础信息'),
+('SLG-ZL-01','1#机组','制冷机组','苏里格制冷班','苏里格大厦','测试厂家E','ZL-800',800,'2020-06-01','演示基础信息'),
+('SLG-ZL-02','2#机组','制冷机组','苏里格制冷班','苏里格大厦','测试厂家E','ZL-800',800,'2020-06-01','演示基础信息');
 
--- 2026-06-27 日报参考数据
-INSERT INTO equipment_runtime(record_time, report_date, team_name, equipment_name, pressure_mpa, supply_temp_c, return_temp_c, runtime_hours, month_runtime_hours, year_runtime_hours, running_status) VALUES
-('2026-06-27 08:00:00','2026-06-27','锅炉运行班','1#锅炉',0,0,0,0,114.24,537.38,'停机'),
-('2026-06-27 08:00:00','2026-06-27','锅炉运行班','2#锅炉',0,0,0,0,1.50,104.01,'停机'),
-('2026-06-27 08:00:00','2026-06-27','锅炉运行班','3#锅炉',0.31,70,60,4.40,11.37,139.77,'运行'),
-('2026-06-27 08:00:00','2026-06-27','锅炉运行班','4#锅炉',0,0,0,0,0,0,'停机'),
-('2026-06-27 08:00:00','2026-06-27','科研楼制冷班','1#机组',NULL,0,0,0,0,1695,'停机'),
-('2026-06-27 08:00:00','2026-06-27','科研楼制冷班','2#机组',NULL,0,0,0,0,1454,'停机'),
-('2026-06-27 08:00:00','2026-06-27','科研楼制冷班','3#机组',NULL,0,0,0,48,735,'停机'),
-('2026-06-27 08:00:00','2026-06-27','大厦制冷班','1#机组',NULL,0,0,0,48,1973,'停机'),
-('2026-06-27 08:00:00','2026-06-27','大厦制冷班','2#机组',NULL,0,0,0,0,1886,'停机'),
-('2026-06-27 08:00:00','2026-06-27','明光路制冷班','1#机组',NULL,0,0,0,26,1760,'停机'),
-('2026-06-27 08:00:00','2026-06-27','明光路制冷班','2#机组',NULL,0,0,0,26,1760,'停机'),
-('2026-06-27 08:00:00','2026-06-27','明光路制冷班','3#机组',NULL,0,0,0,26,1760,'停机'),
-('2026-06-27 08:00:00','2026-06-27','明光路制冷班','4#机组',NULL,0,0,0,26,1593,'停机'),
-('2026-06-27 08:00:00','2026-06-27','明光路制冷班','5#机组',NULL,0,0,0,0,971,'停机'),
-('2026-06-27 08:00:00','2026-06-27','明光路制冷班','6#机组',NULL,0,0,0,48,2332,'停机'),
-('2026-06-27 08:00:00','2026-06-27','明光路制冷班','7#机组',NULL,0,0,0,48,2044,'停机'),
-('2026-06-27 08:00:00','2026-06-27','明光路制冷班','8#机组',NULL,0,0,0,22,473,'停机'),
-('2026-06-27 08:00:00','2026-06-27','明光路制冷班','9#机组',NULL,0,0,0,0,909,'停机'),
-('2026-06-27 08:00:00','2026-06-27','明光路制冷班','10#机组',NULL,0,0,0,26,940,'停机'),
-('2026-06-27 08:00:00','2026-06-27','明光路制冷班','11#机组',NULL,0,0,0,0,818,'停机'),
-('2026-06-27 08:00:00','2026-06-27','苏里格制冷班','1#机组',NULL,0,0,0,25,1252,'停机'),
-('2026-06-27 08:00:00','2026-06-27','苏里格制冷班','2#机组',NULL,0,0,0,0,305,'停机');
+-- 设备状态：同一 equipment_id 可以按不同时间保存多行。
+-- 3#锅炉跨日演示数据，用于验证时间筛选与 JOIN。
+INSERT INTO equipment_status
+(equipment_id, record_time, report_date, pressure_mpa, supply_temp_c, return_temp_c, runtime_hours, month_runtime_hours, year_runtime_hours, running_status)
+SELECT equipment_id,'2026-06-25 08:00:00','2026-06-25',0.30,69,59,4.20,2.77,131.17,'运行'
+FROM equipment_info WHERE equipment_code='GL-03';
+
+INSERT INTO equipment_status
+(equipment_id, record_time, report_date, pressure_mpa, supply_temp_c, return_temp_c, runtime_hours, month_runtime_hours, year_runtime_hours, running_status)
+SELECT equipment_id,'2026-06-26 08:00:00','2026-06-26',0.31,70,60,4.20,6.97,135.37,'运行'
+FROM equipment_info WHERE equipment_code='GL-03';
+
+-- 2026-06-27 日报参考状态。
+INSERT INTO equipment_status
+(equipment_id, record_time, report_date, pressure_mpa, supply_temp_c, return_temp_c, runtime_hours, month_runtime_hours, year_runtime_hours, running_status)
+SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',0,0,0,0,114.24,537.38,'停机' FROM equipment_info WHERE equipment_code='GL-01'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',0,0,0,0,1.50,104.01,'停机' FROM equipment_info WHERE equipment_code='GL-02'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',0.31,70,60,4.40,11.37,139.77,'运行' FROM equipment_info WHERE equipment_code='GL-03'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',0,0,0,0,0,0,'停机' FROM equipment_info WHERE equipment_code='GL-04'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,0,1695,'停机' FROM equipment_info WHERE equipment_code='KYL-ZL-01'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,0,1454,'停机' FROM equipment_info WHERE equipment_code='KYL-ZL-02'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,48,735,'停机' FROM equipment_info WHERE equipment_code='KYL-ZL-03'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,48,1973,'停机' FROM equipment_info WHERE equipment_code='DS-ZL-01'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,0,1886,'停机' FROM equipment_info WHERE equipment_code='DS-ZL-02'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,26,1760,'停机' FROM equipment_info WHERE equipment_code='MGL-ZL-01'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,26,1760,'停机' FROM equipment_info WHERE equipment_code='MGL-ZL-02'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,26,1760,'停机' FROM equipment_info WHERE equipment_code='MGL-ZL-03'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,26,1593,'停机' FROM equipment_info WHERE equipment_code='MGL-ZL-04'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,0,971,'停机' FROM equipment_info WHERE equipment_code='MGL-ZL-05'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,48,2332,'停机' FROM equipment_info WHERE equipment_code='MGL-ZL-06'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,48,2044,'停机' FROM equipment_info WHERE equipment_code='MGL-ZL-07'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,22,473,'停机' FROM equipment_info WHERE equipment_code='MGL-ZL-08'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,0,909,'停机' FROM equipment_info WHERE equipment_code='MGL-ZL-09'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,26,940,'停机' FROM equipment_info WHERE equipment_code='MGL-ZL-10'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,0,818,'停机' FROM equipment_info WHERE equipment_code='MGL-ZL-11'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,25,1252,'停机' FROM equipment_info WHERE equipment_code='SLG-ZL-01'
+UNION ALL SELECT equipment_id,'2026-06-27 08:00:00','2026-06-27',NULL,0,0,0,0,305,'停机' FROM equipment_info WHERE equipment_code='SLG-ZL-02';
 
 INSERT INTO temperature_record(record_time, report_date, location_name, temperature_type, temperature_c) VALUES
 ('2026-06-27 08:00:00','2026-06-27','一区、三区热水','供水温度',58),
@@ -82,9 +140,18 @@ INSERT INTO temperature_record(record_time, report_date, location_name, temperat
 ('2026-06-27 08:00:00','2026-06-27','增压站三区','出水温度',0),
 ('2026-06-27 08:00:00','2026-06-27','增压站五区','出水温度',0);
 
--- 时间绑定验证示例
-SELECT pressure_mpa
-FROM equipment_runtime
-WHERE equipment_name='3#锅炉'
-  AND record_time >= '2026-06-27 00:00:00'
-  AND record_time < '2026-06-28 00:00:00';
+-- JOIN 验证：设备名称只在 equipment_info 中，状态值只在 equipment_status 中。
+SELECT
+  e.equipment_id,
+  e.equipment_name,
+  e.equipment_type,
+  e.team_name,
+  s.record_time,
+  s.pressure_mpa,
+  s.runtime_hours,
+  s.running_status
+FROM equipment_info e
+JOIN equipment_status s ON s.equipment_id = e.equipment_id
+WHERE e.equipment_code='GL-03'
+  AND s.record_time >= '2026-06-27 00:00:00'
+  AND s.record_time < '2026-06-28 00:00:00';
