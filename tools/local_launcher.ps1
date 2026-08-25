@@ -65,8 +65,7 @@ function Stop-LocalMySql([string]$MySqlAdmin) {
 function Invoke-SqlFile([string]$MySql, [string]$RelativePath) {
     $path = Join-Path $ProjectDir $RelativePath
     if (-not (Test-Path $path)) { throw "Missing SQL file: $RelativePath" }
-    $portArg = "--port=$DbPort"
-    $cmd = '"' + $MySql + '" --no-defaults --protocol=tcp --host=127.0.0.1 ' + $portArg + ' --user=root --default-character-set=utf8mb4 < "' + $path + '"'
+    $cmd = '"' + $MySql + '" --no-defaults --protocol=tcp --host=127.0.0.1 --port=' + $DbPort + ' --user=root --default-character-set=utf8mb4 < "' + $path + '"'
     cmd.exe /d /c $cmd
     if ($LASTEXITCODE -ne 0) { throw "Failed to import: $RelativePath" }
 }
@@ -103,8 +102,6 @@ function Show-AppFailure([int]$ExitCode, [double]$ElapsedSeconds) {
         Write-Host '---------------- crash log --------------------' -ForegroundColor Yellow
         Get-Content $CrashLog -Tail 60 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
         Write-Host '------------------------------------------------' -ForegroundColor Yellow
-    } else {
-        Write-Host "No application crash log found at: $CrashLog" -ForegroundColor DarkYellow
     }
 
     Write-Host 'The launcher will remain open so the error can be read.' -ForegroundColor Yellow
@@ -182,8 +179,17 @@ try {
     $basicExists = & $mysql @tcpArgs -N -B -e "SHOW DATABASES LIKE 'production_basic_demo';" 2>$null
     $statusTableExists = & $mysql @tcpArgs -N -B -e "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='production_operation_demo' AND TABLE_NAME='equipment_status';" 2>$null
     $equipmentIdType = & $mysql @tcpArgs -N -B -e "SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='production_operation_demo' AND TABLE_NAME='equipment_info' AND COLUMN_NAME='equipment_id';" 2>$null
+    $statusColumnCount = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='production_operation_demo' AND TABLE_NAME='equipment_status';" 2>$null
+    $statusRequiredColumns = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='production_operation_demo' AND TABLE_NAME='equipment_status' AND COLUMN_NAME IN ('equipment_id','record_time','temperature_c');" 2>$null
+    $hourlyRows = & $mysql @tcpArgs -N -B -e "SELECT COUNT(*) FROM production_operation_demo.equipment_status WHERE equipment_id='GL-03';" 2>$null
 
-    $needsImport = ($basicExists -ne 'production_basic_demo') -or ($statusTableExists -ne 'equipment_status') -or ($equipmentIdType -ne 'varchar')
+    $needsImport = ($basicExists -ne 'production_basic_demo') -or
+                   ($statusTableExists -ne 'equipment_status') -or
+                   ($equipmentIdType -ne 'varchar') -or
+                   ([string]$statusColumnCount -ne '3') -or
+                   ([string]$statusRequiredColumns -ne '3') -or
+                   ([string]$hourlyRows -ne '120')
+
     if ($needsImport) {
         Write-Host '      Initializing/upgrading reference database schema...'
         $scripts = @(
@@ -220,9 +226,7 @@ try {
     Remove-Item $AppPidFile -Force -ErrorAction SilentlyContinue
 
     $suspiciousExit = ($appExit -ne 0) -or ($elapsed -lt 3)
-    if ($suspiciousExit) {
-        Show-AppFailure $appExit $elapsed
-    }
+    if ($suspiciousExit) { Show-AppFailure $appExit $elapsed }
 
     Write-Host ''
     Write-Host 'Application closed. Stopping dedicated MySQL instance...'
@@ -242,9 +246,6 @@ catch {
     Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
     Write-Host 'Startup failed. No unknown MySQL process was killed.'
     Write-Host 'If the dedicated test instance remains running, use stop_all.bat.'
-    if (Test-Path $CrashLog) {
-        Write-Host "Crash log: $CrashLog" -ForegroundColor Yellow
-    }
     Read-Host 'Press Enter to continue'
     exit 1
 }
