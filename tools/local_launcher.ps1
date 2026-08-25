@@ -31,7 +31,7 @@ function Test-ProcessId([string]$PidText, [string]$ExpectedName = '') {
 }
 
 function Get-MySqlTcpArgs {
-    return @('--no-defaults','--protocol=tcp','--host=127.0.0.1',"--port=$DbPort",'--user=root')
+    return @('--no-defaults','--protocol=tcp','--host=127.0.0.1',"--port=$DbPort",'--user=root','--default-character-set=utf8mb4')
 }
 
 function Wait-MySql([string]$MySqlAdmin) {
@@ -63,7 +63,7 @@ function Invoke-SqlFile([string]$MySql, [string]$RelativePath) {
     $path = Join-Path $ProjectDir $RelativePath
     if (-not (Test-Path $path)) { throw "Missing SQL file: $RelativePath" }
     $portArg = "--port=$DbPort"
-    $cmd = '"' + $MySql + '" --no-defaults --protocol=tcp --host=127.0.0.1 ' + $portArg + ' --user=root < "' + $path + '"'
+    $cmd = '"' + $MySql + '" --no-defaults --protocol=tcp --host=127.0.0.1 ' + $portArg + ' --user=root --default-character-set=utf8mb4 < "' + $path + '"'
     cmd.exe /d /c $cmd
     if ($LASTEXITCODE -ne 0) { throw "Failed to import: $RelativePath" }
 }
