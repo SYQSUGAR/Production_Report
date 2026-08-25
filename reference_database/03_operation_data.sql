@@ -72,12 +72,12 @@ INSERT INTO equipment_info
 
 -- 生成 120 个连续整点：2026-06-23 00:00 到 2026-06-27 23:00。
 -- 与所有设备做笛卡尔组合，因此每台设备都有完整 5 天、每小时一条的状态记录。
+INSERT INTO equipment_status (equipment_id, record_time, temperature_c)
 WITH RECURSIVE hours AS (
   SELECT 0 AS hour_offset
   UNION ALL
   SELECT hour_offset + 1 FROM hours WHERE hour_offset < 119
 )
-INSERT INTO equipment_status (equipment_id, record_time, temperature_c)
 SELECT
   e.equipment_id,
   TIMESTAMP('2026-06-23 00:00:00') + INTERVAL h.hour_offset HOUR,
