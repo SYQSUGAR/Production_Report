@@ -10,6 +10,7 @@ from PyQt6.QtCore import Qt, QLibraryInfo, QLocale, QTranslator
 from PyQt6.QtGui import QFont
 
 from ui.workspace_window import WorkspaceWindow
+from ui.db_connection_patch import install_db_connection_patch
 
 
 _APP_DATA_DIR = os.path.join(os.path.expanduser("~"), ".report_editor")
@@ -77,6 +78,7 @@ def main():
     app.setFont(font)
 
     try:
+        install_db_connection_patch()
         window = WorkspaceWindow()
         window.show()
         return app.exec()
