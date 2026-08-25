@@ -18,7 +18,7 @@ class DbHandler:
         """Connect to the database server.
 
         ``config.database`` is optional and retained only for backward
-        compatibility with older templates.  New projects connect at server
+        compatibility with older templates. New projects connect at server
         level first, then choose one or more databases separately.
         """
         self.last_error = ""
@@ -153,8 +153,6 @@ class DbHandler:
                     if database in result and table and column:
                         result[database].setdefault(table, []).append(column)
             else:
-                # SQL Server needs a per-catalog INFORMATION_SCHEMA query.
-                # Database names come from sys.databases, so they are bracket-escaped here.
                 for database in selected:
                     safe_db = database.replace("]", "]]" )
                     cursor.execute(
@@ -222,6 +220,23 @@ class DbHandler:
                 except Exception:
                     pass
 
+    def _select_database(self, config_key: str, database_name: str):
+        if not database_name:
+            return
+        conn = self._connections.get(config_key)
+        config = self._configs.get(config_key)
+        if not conn or not config:
+            return
+        if config.db_type == "mysql":
+            conn.select_db(database_name)
+        else:
+            safe_db = database_name.replace("]", "]]" )
+            cursor = conn.cursor()
+            try:
+                cursor.execute(f"USE [{safe_db}]")
+            finally:
+                cursor.close()
+
     def execute_query(
         self,
         sql: str,
@@ -229,21 +244,11 @@ class DbHandler:
         database_name: str = "",
     ) -> Optional[str]:
         conn = self._connections.get(config_key)
-        config = self._configs.get(config_key)
         if not conn:
             return None
         cursor = None
         try:
-            if database_name and config:
-                if config.db_type == "mysql":
-                    conn.select_db(database_name)
-                else:
-                    safe_db = database_name.replace("]", "]]" )
-                    switch_cursor = conn.cursor()
-                    try:
-                        switch_cursor.execute(f"USE [{safe_db}]")
-                    finally:
-                        switch_cursor.close()
+            self._select_database(config_key, database_name)
             cursor = conn.cursor()
             cursor.execute(sql)
             row = cursor.fetchone()
@@ -254,6 +259,49 @@ class DbHandler:
         except Exception as exc:
             self.last_error = str(exc)
             print(f"查询执行失败: {exc}")
+            return None
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+
+    def execute_rows(
+        self,
+        sql: str,
+        config_key: str = "default",
+        database_name: str = "",
+    ) -> tuple[list[str], list[list[object]]] | None:
+        """Execute a read-only SELECT and return column names plus rows.
+
+        A tuple cursor is used for MySQL so duplicate column names from ``t1.*, t2.*``
+        are not collapsed by DictCursor. This method is intended for preview windows.
+        """
+        conn = self._connections.get(config_key)
+        config = self._configs.get(config_key)
+        if not conn or not config:
+            self.last_error = "数据库未连接"
+            return None
+        if not (sql or "").lstrip().upper().startswith("SELECT"):
+            self.last_error = "数据预览仅支持 SELECT 查询"
+            return None
+        cursor = None
+        try:
+            self._select_database(config_key, database_name)
+            if config.db_type == "mysql":
+                import pymysql
+                cursor = conn.cursor(pymysql.cursors.Cursor)
+            else:
+                cursor = conn.cursor()
+            cursor.execute(sql)
+            description = cursor.description or []
+            columns = [str(item[0]) for item in description]
+            rows = [list(row) for row in cursor.fetchall()]
+            return columns, rows
+        except Exception as exc:
+            self.last_error = str(exc)
+            print(f"预览查询执行失败: {exc}")
             return None
         finally:
             if cursor is not None:
