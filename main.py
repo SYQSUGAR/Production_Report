@@ -14,6 +14,7 @@ from ui.db_connection_patch import install_db_connection_patch
 from ui.database_binding_v2 import install_database_binding_v2
 from ui.database_binding_v2_guard import install_database_binding_v2_guard
 from ui.database_binding_v2_finish import install_database_binding_v2_finish
+from ui.database_binding_v3_final import install_database_binding_v3_final
 
 
 _APP_DATA_DIR = os.path.join(os.path.expanduser("~"), ".report_editor")
@@ -76,11 +77,12 @@ def main():
     app.setFont(font)
 
     try:
-        # 安装顺序：服务器/数据库范围 -> 多 JOIN/预览 -> 构造期保护 -> 折叠分区。
+        # 安装顺序：服务器/数据库范围 -> V2 多 JOIN 基础 -> 构造保护/折叠 -> 最终交互。
         install_db_connection_patch()
         install_database_binding_v2()
         install_database_binding_v2_guard()
         install_database_binding_v2_finish()
+        install_database_binding_v3_final()
         window = WorkspaceWindow()
         window.show()
         return app.exec()
