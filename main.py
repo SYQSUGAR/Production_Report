@@ -12,6 +12,7 @@ from PyQt6.QtGui import QFont
 from ui.workspace_window import WorkspaceWindow
 from ui.db_connection_patch import install_db_connection_patch
 from ui.database_binding_v2 import install_database_binding_v2
+from ui.database_binding_v2_guard import install_database_binding_v2_guard
 
 
 _APP_DATA_DIR = os.path.join(os.path.expanduser("~"), ".report_editor")
@@ -74,9 +75,10 @@ def main():
     app.setFont(font)
 
     try:
-        # 先安装服务器连接/多数据库范围，再叠加多 JOIN 与预览界面。
+        # 安装顺序：服务器/数据库范围 -> 多 JOIN/预览 -> 构造期保护。
         install_db_connection_patch()
         install_database_binding_v2()
+        install_database_binding_v2_guard()
         window = WorkspaceWindow()
         window.show()
         return app.exec()
