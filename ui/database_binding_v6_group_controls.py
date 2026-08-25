@@ -1,10 +1,10 @@
-"""最终修正 JOIN 整组控制位置与紧凑布局。"""
+"""最终修正 JOIN 整组控制位置、紧凑布局与控件生命周期。"""
 
 
 def install_database_binding_v6_group_controls():
     import ui.editor_side_panels as esp
     from PyQt6.QtCore import Qt
-    from PyQt6.QtWidgets import QPushButton, QVBoxLayout
+    from PyQt6.QtWidgets import QVBoxLayout
 
     if getattr(esp, "_database_binding_v6_group_controls_installed", False):
         return
@@ -14,6 +14,7 @@ def install_database_binding_v6_group_controls():
     previous_init = cls.__init__
     previous_add_join = cls._add_join_row_v2
     previous_add_condition = cls._add_join_condition_v2
+    previous_remove_join = cls._remove_join_v2
     previous_load = cls._load_db_binding
     previous_join_changed = cls._on_join_changed_v2
 
@@ -21,7 +22,7 @@ def install_database_binding_v6_group_controls():
         if label is None:
             return
         label.setText(text)
-        # 不再人为给标签预留 70~80px；只占文字本身所需宽度，空间尽量留给输入框。
+        # 标签只占文字实际宽度，横向空间尽量留给表名和字段输入框。
         label.setMinimumWidth(0)
         label.setMaximumWidth(label.sizeHint().width() + 2)
 
@@ -44,7 +45,6 @@ def install_database_binding_v6_group_controls():
 
         frame = row.get("widget")
         if frame is not None and frame.layout() is not None:
-            # 卡片内部边距也适当压缩，给表名/字段输入更多横向空间。
             frame.layout().setContentsMargins(3, 4, 3, 4)
             frame.layout().setSpacing(3)
 
@@ -58,64 +58,72 @@ def install_database_binding_v6_group_controls():
                 widget.layout().setSpacing(2)
 
     def _install_external_controls(panel, row):
+        """复用 V2 原始 ↑ ↓ ×，只移动位置，绝不销毁按钮对象。"""
         controls = row.get("v5_group_controls")
         if controls is None:
             return
 
-        # 旧的整组按钮始终隐藏，右侧控制栏使用独立按钮。
-        for old in (row["up"], row["down"], row["remove"]):
-            old.hide()
-
-        # V5 的 shell 是“卡片 + 右侧控制栏”。把间距压到最小，让卡片尽量向右延伸。
         shell = row.get("v5_outer_shell")
         if shell is not None and shell.layout() is not None:
             shell.layout().setContentsMargins(0, 0, 0, 0)
             shell.layout().setSpacing(3)
 
-        # 控制栏只保留按钮，不再显示“整组关联”文字。
         controls.setMinimumWidth(32)
         controls.setMaximumWidth(36)
         layout = controls.layout()
         if layout is None:
             layout = QVBoxLayout(controls)
+
+        original_buttons = (row["up"], row["down"], row["remove"])
+
+        # 清理 V5/V6 旧版遗留的标题或替代按钮，但保留真正的 row 按钮。
         while layout.count():
             item = layout.takeAt(0)
             widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
+            if widget is None:
+                continue
+            if widget in original_buttons:
+                widget.setParent(controls)
+                continue
+            widget.setParent(None)
+            widget.deleteLater()
 
         layout.setContentsMargins(1, 2, 1, 2)
         layout.setSpacing(3)
         layout.addStretch(1)
 
-        btn_up = QPushButton("↑")
-        btn_down = QPushButton("↓")
-        btn_remove = QPushButton("×")
-        for button in (btn_up, btn_down, btn_remove):
+        # 关键：row[up/down/remove] 仍是 V2/V3 后续刷新会访问的同一批 QPushButton。
+        # 不创建替代按钮，也不 deleteLater，因此不会再出现 wrapped C/C++ object deleted。
+        for button in original_buttons:
+            button.setParent(controls)
+            button.show()
             button.setFixedSize(30, 24)
             layout.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
         layout.addStretch(1)
 
-        btn_up.setToolTip("整组关联上移")
-        btn_down.setToolTip("整组关联下移")
-        btn_remove.setToolTip("删除整组关联")
-        btn_up.clicked.connect(lambda: panel._move_join_v2(row, -1))
-        btn_down.clicked.connect(lambda: panel._move_join_v2(row, 1))
-        btn_remove.clicked.connect(lambda: panel._remove_join_v2(row))
-
-        row["v6_up"] = btn_up
-        row["v6_down"] = btn_down
-        row["v6_remove"] = btn_remove
+        row["up"].setToolTip("整组关联上移")
+        row["down"].setToolTip("整组关联下移")
+        row["remove"].setToolTip("删除整组关联")
         row["v6_external_controls"] = True
+
+        # 清理旧版 V6 创建过的替代按钮引用，避免后续状态更新碰到已销毁对象。
+        for key in ("v6_up", "v6_down", "v6_remove"):
+            row.pop(key, None)
 
     def _refresh_buttons(panel):
         rows = list(getattr(panel, "_join_rows", []) or [])
         for index, row in enumerate(rows):
-            if row.get("v6_up") is not None:
-                row["v6_up"].setEnabled(index > 0)
-            if row.get("v6_down") is not None:
-                row["v6_down"].setEnabled(index < len(rows) - 1)
+            # V3 自己也会更新这两个状态，这里再次同步，且直接使用原始按钮。
+            row["up"].setEnabled(index > 0)
+            row["down"].setEnabled(index < len(rows) - 1)
+            # 删除按钮任何一组都可用，包括第一组和最后一组。
+            row["remove"].setEnabled(True)
+
+        # 删除到 0 组后必须还能重新添加第一组，不能把用户锁死在空状态。
+        add_join = getattr(panel, "_btn_add_join_v2", None)
+        if add_join is not None and not rows:
+            add_join.setEnabled(True)
+            add_join.setToolTip("添加第一组表关联")
 
     def _refresh(panel):
         group = getattr(panel, "_join_group_v2", None)
@@ -126,7 +134,6 @@ def install_database_binding_v6_group_controls():
             group.blockSignals(False)
         for row in list(getattr(panel, "_join_rows", []) or []):
             _rename_and_compact_row(panel, row)
-            # 每次刷新都重建右侧控制栏，避免旧 patch 把按钮或标题重新塞回来。
             _install_external_controls(panel, row)
         _refresh_buttons(panel)
 
@@ -144,6 +151,14 @@ def install_database_binding_v6_group_controls():
         _refresh(self)
         return result
 
+    def remove_join(self, row):
+        # 明确允许删除任意整组关联，包括第 1 组以及仅剩的最后 1 组。
+        if row not in list(getattr(self, "_join_rows", []) or []):
+            return
+        result = previous_remove_join(self, row)
+        _refresh(self)
+        return result
+
     def load_binding(self):
         result = previous_load(self)
         _refresh(self)
@@ -157,5 +172,6 @@ def install_database_binding_v6_group_controls():
     cls.__init__ = panel_init
     cls._add_join_row_v2 = add_join
     cls._add_join_condition_v2 = add_condition
+    cls._remove_join_v2 = remove_join
     cls._load_db_binding = load_binding
     cls._on_join_changed_v2 = join_changed
