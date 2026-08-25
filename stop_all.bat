@@ -35,7 +35,7 @@ if not defined MYSQLADMIN if exist "%MYSQL_HOME%" for /r "%MYSQL_HOME%" %%F in (
 rem Try a clean shutdown first. This dedicated instance has an empty root
 rem password and is bound only to 127.0.0.1:3307.
 if defined MYSQLADMIN (
-    "%MYSQLADMIN%" --no-defaults --protocol=tcp -h127.0.0.1 -P%DB_PORT% -uroot shutdown >nul 2>&1
+    "%MYSQLADMIN%" --no-defaults --protocol=tcp --host=127.0.0.1 --port=%DB_PORT% --user=root shutdown >nul 2>&1
 )
 
 timeout /t 1 /nobreak >nul
