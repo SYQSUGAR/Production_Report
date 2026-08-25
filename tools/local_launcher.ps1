@@ -10,6 +10,8 @@ $LogDir = Join-Path $InstanceRoot 'logs'
 $PidFile = Join-Path $RunDir 'mysqld.pid'
 $AppPidFile = Join-Path $RunDir 'app.pid'
 $LogFile = Join-Path $LogDir 'mysql-error.log'
+$AppStdoutLog = Join-Path $LogDir 'pyqt-stdout.log'
+$AppStderrLog = Join-Path $LogDir 'pyqt-stderr.log'
 $CrashLog = Join-Path $HOME '.report_editor\crash.log'
 
 function Find-Exe([string]$Name) {
@@ -75,14 +77,36 @@ function Show-AppFailure([int]$ExitCode, [double]$ElapsedSeconds) {
     Write-Host 'PyQt application exited unexpectedly.' -ForegroundColor Red
     Write-Host "Exit code : $ExitCode" -ForegroundColor Red
     Write-Host ('Run time  : {0:N1} seconds' -f $ElapsedSeconds) -ForegroundColor Red
+
+    if (Test-Path $AppStderrLog) {
+        $stderrLines = Get-Content $AppStderrLog -Tail 100 -ErrorAction SilentlyContinue
+        if ($stderrLines) {
+            Write-Host "Python stderr: $AppStderrLog" -ForegroundColor Yellow
+            Write-Host '---------------- Python stderr ----------------' -ForegroundColor Yellow
+            $stderrLines | ForEach-Object { Write-Host $_ }
+            Write-Host '------------------------------------------------' -ForegroundColor Yellow
+        }
+    }
+
+    if (Test-Path $AppStdoutLog) {
+        $stdoutLines = Get-Content $AppStdoutLog -Tail 60 -ErrorAction SilentlyContinue
+        if ($stdoutLines) {
+            Write-Host "Python stdout: $AppStdoutLog" -ForegroundColor Yellow
+            Write-Host '---------------- Python stdout ----------------' -ForegroundColor Yellow
+            $stdoutLines | ForEach-Object { Write-Host $_ }
+            Write-Host '------------------------------------------------' -ForegroundColor Yellow
+        }
+    }
+
     if (Test-Path $CrashLog) {
         Write-Host "Crash log : $CrashLog" -ForegroundColor Yellow
-        Write-Host '---------------- last crash log lines ----------------' -ForegroundColor Yellow
+        Write-Host '---------------- crash log --------------------' -ForegroundColor Yellow
         Get-Content $CrashLog -Tail 60 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
-        Write-Host '--------------------------------------------------------' -ForegroundColor Yellow
+        Write-Host '------------------------------------------------' -ForegroundColor Yellow
     } else {
-        Write-Host "No crash log found at: $CrashLog" -ForegroundColor Yellow
+        Write-Host "No application crash log found at: $CrashLog" -ForegroundColor DarkYellow
     }
+
     Write-Host 'The launcher will remain open so the error can be read.' -ForegroundColor Yellow
     Write-Host '============================================================' -ForegroundColor Red
 }
@@ -186,8 +210,9 @@ try {
     Write-Host '[4/4] Starting PyQt application...'
     Write-Host 'Close the PyQt window normally to stop this dedicated MySQL instance.'
 
+    Remove-Item $AppStdoutLog,$AppStderrLog -Force -ErrorAction SilentlyContinue
     $startedAt = Get-Date
-    $app = Start-Process -FilePath $python -ArgumentList 'main.py' -WorkingDirectory $ProjectDir -PassThru
+    $app = Start-Process -FilePath $python -ArgumentList 'main.py' -WorkingDirectory $ProjectDir -RedirectStandardOutput $AppStdoutLog -RedirectStandardError $AppStderrLog -PassThru
     Set-Content -Path $AppPidFile -Value $app.Id -Encoding ascii
     $app.WaitForExit()
     $appExit = $app.ExitCode
