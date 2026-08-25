@@ -25,6 +25,8 @@ start_all.bat
 
 启动器会检查 Python 和 MySQL，在 `D:\3SoftWare\mysql\production_report_demo\data` 使用独立数据目录，以 `127.0.0.1:3307` 启动本项目专用 MySQL。第一次启动或检测到旧版参考数据库结构时，会自动执行最新 SQL 脚本进行初始化/升级，然后启动 `main.py`。正常关闭 PyQt 后，启动器会自动关闭该测试 MySQL，但保留数据目录。
 
+如果 PyQt 启动后几秒内退出，或返回非 0 退出码，启动窗口会保留，并显示程序退出码以及 `~\.report_editor\crash.log` 尾部内容，便于定位闪退原因。
+
 ## 防止重复启动
 
 固定配置：
@@ -101,12 +103,22 @@ D:\3SoftWare\mysql\production_report_demo\data
 
 ### 03_operation_data.sql
 
-创建 `production_operation_demo`，核心采用标准“主数据 + 时序状态”结构：
+创建 `production_operation_demo`，核心采用“设备主数据 + 时序状态”结构。
+
+`equipment_id` 现在直接就是业务设备编号，不再额外保存一套自增数字 ID。例如：
+
+```text
+GL-01 = 1#锅炉
+GL-02 = 2#锅炉
+GL-03 = 3#锅炉
+MGL-ZL-06 = 明光路 6#机组
+```
+
+结构如下：
 
 ```text
 equipment_info       设备基本信息，一台设备只有一行
-    equipment_id PK
-    equipment_code
+    equipment_id PK   业务设备编号，如 GL-03
     equipment_name
     equipment_type
     team_name
@@ -124,7 +136,7 @@ equipment_info       设备基本信息，一台设备只有一行
 
 equipment_status     设备状态/历史数据，同一设备可有很多行
     status_id PK
-    equipment_id FK
+    equipment_id FK   同样保存 GL-03，不保存设备名称
     record_time
     report_date
     pressure_mpa
@@ -136,20 +148,20 @@ equipment_status     设备状态/历史数据，同一设备可有很多行
     running_status
 ```
 
-例如 `3#锅炉` 的名称、类型、班组等只在 `equipment_info` 保存一次；2026-06-25、26、27 的压力、温度、运行时间分别作为多条 `equipment_status` 记录，并使用同一个 `equipment_id` 关联。
+例如 `3#锅炉` 的名称、类型、班组等只在 `equipment_info` 保存一次；2026-06-25、26、27 的压力、温度、运行时间分别作为多条 `equipment_status` 记录，并且三行状态数据中的 `equipment_id` 都直接是 `GL-03`。
 
-因此查询“3#锅炉在 2026-06-27 的压力”时，可以真实验证 JOIN：
+查询时通过设备编号进行 JOIN：
 
 ```sql
-SELECT e.equipment_name, s.record_time, s.pressure_mpa
+SELECT e.equipment_id, e.equipment_name, s.record_time, s.pressure_mpa
 FROM equipment_info e
 JOIN equipment_status s ON s.equipment_id = e.equipment_id
-WHERE e.equipment_code = 'GL-03'
+WHERE e.equipment_id = 'GL-03'
   AND s.record_time >= '2026-06-27 00:00:00'
   AND s.record_time < '2026-06-28 00:00:00';
 ```
 
-另外保留 `temperature_record` 用于区域温度时序数据测试。
+另外保留 `temperature_record` 用于区域温度时序数据测试。它属于区域级数据，不对应单台设备，因此不使用 `equipment_id`。
 
 ### 04_maintenance_data.sql
 
