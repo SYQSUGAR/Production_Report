@@ -38,6 +38,34 @@ class _TimeFieldPopupFilter(QObject):
             self._combo.showPopup()
 
 
+class _TimeFieldChoiceCloseFilter(QObject):
+    """时间字段候选被点击/回车选中后立即收起。"""
+
+    def __init__(self, combo):
+        super().__init__(combo)
+        self._combo = combo
+
+    def close_popup(self):
+        try:
+            self._combo.hidePopup()
+        except RuntimeError:
+            return
+        comp = self._combo.completer()
+        if comp is not None and comp.popup() is not None:
+            comp.popup().hide()
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.MouseButtonRelease:
+            QTimer.singleShot(0, self.close_popup)
+        elif event.type() == QEvent.Type.KeyPress and event.key() in (
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+            Qt.Key.Key_Tab,
+        ):
+            QTimer.singleShot(0, self.close_popup)
+        return False
+
+
 class TimeBindingPanel(QWidget):
     """为模板当前单元格/选区配置时间规则。"""
 
@@ -102,6 +130,25 @@ class TimeBindingPanel(QWidget):
                 if self._time_field.completer() is not None else None,
             )
         )
+
+        # 与数据库绑定区域统一：无论鼠标点击补全候选、按 Enter 选中，都会立即关闭候选层。
+        self._time_field_choice_filter = _TimeFieldChoiceCloseFilter(self._time_field)
+        if completer is not None:
+            completer.activated.connect(
+                lambda *_: QTimer.singleShot(0, self._time_field_choice_filter.close_popup)
+            )
+            popup = completer.popup()
+            if popup is not None:
+                popup.installEventFilter(self._time_field_choice_filter)
+                if popup.viewport() is not None:
+                    popup.viewport().installEventFilter(self._time_field_choice_filter)
+        self._time_field.activated.connect(
+            lambda *_: QTimer.singleShot(0, self._time_field_choice_filter.close_popup)
+        )
+        self._time_field.lineEdit().returnPressed.connect(
+            lambda: QTimer.singleShot(0, self._time_field_choice_filter.close_popup)
+        )
+
         self._time_field.currentTextChanged.connect(self._changed)
         form.addRow("时间字段:", self._time_field)
 
@@ -139,6 +186,15 @@ class TimeBindingPanel(QWidget):
         self._time_field.addItems(list(dict.fromkeys(fields or [])))
         self._time_field.setCurrentText(current)
         self._time_field.blockSignals(False)
+
+        # clear/addItems 后 Qt 可能替换 completer/popup，再次确保新 popup 也安装关闭过滤器。
+        completer = self._time_field.completer()
+        if completer is not None:
+            popup = completer.popup()
+            if popup is not None:
+                popup.installEventFilter(self._time_field_choice_filter)
+                if popup.viewport() is not None:
+                    popup.viewport().installEventFilter(self._time_field_choice_filter)
 
     def set_selected_cells(self, cells: list):
         self._selected_cells = list(dict.fromkeys(cells or []))
