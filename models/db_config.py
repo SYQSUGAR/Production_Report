@@ -27,6 +27,7 @@ class DbConfig:
     port: int = 3306
     user: str = ""
     password: str = ""
+    # 仅为旧模板兼容保留。新版连接配置按服务器级保存，不要求数据库名。
     database: str = ""
     charset: str = "utf8mb4"
 
@@ -51,12 +52,15 @@ class DbConfig:
 class QueryBinding:
     """单元格数据库查询绑定。
 
-    模板阶段的动态时间 SQL 使用 ``{start_time}`` / ``{end_time}``；
-    报表生成时由 ReportContext 替换为本次预览选择出的实际时间。
+    新版绑定会同时保存 database/schema/table 身份；只启用一个数据库时
+    SQL 可以使用简写表名，多数据库时自动使用 database.table 消除歧义。
     """
     enabled: bool = False
     query_type: QueryType = QueryType.SINGLE
     db_config_key: str = ""
+    database_name: str = ""
+    schema_name: str = ""
+    qualify_database: bool = False
     table_name: str = ""
     field_name: str = ""
     aggregate_func: str = ""
@@ -71,7 +75,11 @@ class QueryBinding:
     def to_dict(self) -> dict:
         return {
             "enabled": self.enabled, "query_type": self.query_type.value,
-            "db_config_key": self.db_config_key, "table_name": self.table_name,
+            "db_config_key": self.db_config_key,
+            "database_name": self.database_name,
+            "schema_name": self.schema_name,
+            "qualify_database": self.qualify_database,
+            "table_name": self.table_name,
             "field_name": self.field_name, "aggregate_func": self.aggregate_func,
             "sql_mode": self.sql_mode, "custom_sql": self.custom_sql,
             "sync_modes": self.sync_modes, "joins": self.joins, "filters": self.filters,
@@ -84,7 +92,11 @@ class QueryBinding:
         return cls(
             enabled=data.get("enabled", False),
             query_type=QueryType(data.get("query_type", "single")),
-            db_config_key=data.get("db_config_key", ""), table_name=data.get("table_name", ""),
+            db_config_key=data.get("db_config_key", ""),
+            database_name=data.get("database_name", ""),
+            schema_name=data.get("schema_name", ""),
+            qualify_database=data.get("qualify_database", False),
+            table_name=data.get("table_name", ""),
             field_name=data.get("field_name", ""), aggregate_func=data.get("aggregate_func", ""),
             sql_mode=data.get("sql_mode", "builder"), custom_sql=data.get("custom_sql", ""),
             sync_modes=data.get("sync_modes", False), joins=data.get("joins", []),
@@ -132,6 +144,21 @@ class QueryBinding:
             return "{start_time}", "{end_time}"
         return self._format_datetime(start), self._format_datetime(end)
 
+    def table_sql_name(self) -> str:
+        table = self.table_name.strip()
+        if not table:
+            return ""
+        # 用户手动输入了限定名时保持原样。
+        if "." in table:
+            return table
+        if self.schema_name.strip():
+            if self.database_name.strip() and self.qualify_database:
+                return f"{self.database_name.strip()}.{self.schema_name.strip()}.{table}"
+            return f"{self.schema_name.strip()}.{table}"
+        if self.database_name.strip() and self.qualify_database:
+            return f"{self.database_name.strip()}.{table}"
+        return table
+
     def build_sql(self, date_value: str = "", time_range=None) -> str:
         if not self.enabled:
             return ""
@@ -149,17 +176,19 @@ class QueryBinding:
                     sql = sql.replace("{end_time}", end_token)
             return sql
 
-        if not self.table_name or not self.field_name:
+        table_expr = self.table_sql_name()
+        if not table_expr or not self.field_name:
             return ""
 
         field_expr = self.field_name
         if self.query_type == QueryType.AGGREGATE and self.aggregate_func:
             field_expr = f"{self.aggregate_func}({self.field_name})"
 
-        sql = f"SELECT {field_expr} FROM {self.table_name}"
+        sql = f"SELECT {field_expr} FROM {table_expr}"
         for join in self.joins:
-            if join.get("table") and join.get("on"):
-                sql += f" {join.get('type', 'LEFT JOIN').upper()} {join['table']} ON {join['on']}"
+            join_table = (join.get("table") or "").strip()
+            if join_table and join.get("on"):
+                sql += f" {join.get('type', 'LEFT JOIN').upper()} {join_table} ON {join['on']}"
 
         conditions: list[tuple[str, str]] = []
         for f in self.filters:
@@ -190,7 +219,6 @@ class QueryBinding:
         return sql
 
     def validate_time_sql(self) -> str:
-        """确保界面上的时间绑定确实进入手动 SQL。"""
         tb = self.time_binding
         if not tb.enabled:
             return ""
