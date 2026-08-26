@@ -18,6 +18,7 @@ from ui.database_binding_v3_final import install_database_binding_v3_final
 from ui.database_binding_v4_refine import install_database_binding_v4_refine
 from ui.database_binding_v5_visual_hierarchy import install_database_binding_v5_visual_hierarchy
 from ui.database_binding_v6_group_controls import install_database_binding_v6_group_controls
+from ui.database_binding_v7_unified_interaction import install_database_binding_v7_unified_interaction
 
 
 _APP_DATA_DIR = os.path.join(os.path.expanduser("~"), ".report_editor")
@@ -80,7 +81,7 @@ def main():
     app.setFont(font)
 
     try:
-        # 安装顺序：服务器/数据库范围 -> V2 多 JOIN 基础 -> 构造保护/折叠 -> 最终交互 -> 交互收尾 -> 视觉层级 -> 外置整组控制修正。
+        # 安装顺序：旧兼容层先完成构造，V7 最后统一接管搜索输入和数据案例预览状态。
         install_db_connection_patch()
         install_database_binding_v2()
         install_database_binding_v2_guard()
@@ -89,6 +90,7 @@ def main():
         install_database_binding_v4_refine()
         install_database_binding_v5_visual_hierarchy()
         install_database_binding_v6_group_controls()
+        install_database_binding_v7_unified_interaction()
         window = WorkspaceWindow()
         window.show()
         return app.exec()
