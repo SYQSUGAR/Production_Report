@@ -66,6 +66,8 @@ class QueryBinding:
     qualify_database: bool = False
     table_name: str = ""
     source_alias: str = ""
+    # single / join。旧模板没有该字段时由 joins 是否为空自动推断。
+    source_mode: str = "single"
     field_name: str = ""
     aggregate_func: str = ""
     sql_mode: str = "builder"
@@ -85,6 +87,7 @@ class QueryBinding:
             "qualify_database": self.qualify_database,
             "table_name": self.table_name,
             "source_alias": self.source_alias,
+            "source_mode": self.source_mode,
             "field_name": self.field_name, "aggregate_func": self.aggregate_func,
             "sql_mode": self.sql_mode, "custom_sql": self.custom_sql,
             "sync_modes": self.sync_modes, "joins": self.joins, "filters": self.filters,
@@ -94,6 +97,10 @@ class QueryBinding:
 
     @classmethod
     def from_dict(cls, data: dict) -> "QueryBinding":
+        joins = data.get("joins", []) or []
+        source_mode = str(data.get("source_mode", "") or "").lower()
+        if source_mode not in ("single", "join"):
+            source_mode = "join" if joins else "single"
         return cls(
             enabled=data.get("enabled", False),
             query_type=QueryType(data.get("query_type", "single")),
@@ -103,9 +110,10 @@ class QueryBinding:
             qualify_database=data.get("qualify_database", False),
             table_name=data.get("table_name", ""),
             source_alias=data.get("source_alias", ""),
+            source_mode=source_mode,
             field_name=data.get("field_name", ""), aggregate_func=data.get("aggregate_func", ""),
             sql_mode=data.get("sql_mode", "builder"), custom_sql=data.get("custom_sql", ""),
-            sync_modes=data.get("sync_modes", False), joins=data.get("joins", []),
+            sync_modes=data.get("sync_modes", False), joins=joins,
             filters=data.get("filters", []), date_placeholder=data.get("date_placeholder", ""),
             time_binding=TimeBinding.from_dict(data.get("time_binding")),
         )
@@ -203,7 +211,7 @@ class QueryBinding:
     def _join_on_sql(join: dict) -> str:
         conditions = join.get("conditions") or []
         rendered = []
-        for index, condition in enumerate(conditions):
+        for condition in conditions:
             left = (condition.get("left") or "").strip()
             right = (condition.get("right") or "").strip()
             op = (condition.get("op") or "=").strip()
@@ -212,7 +220,7 @@ class QueryBinding:
             connector = (condition.get("connector") or "AND").upper()
             if connector not in ("AND", "OR"):
                 connector = "AND"
-            prefix = "" if index == 0 else f" {connector} "
+            prefix = "" if not rendered else f" {connector} "
             rendered.append(f"{prefix}{left} {op} {right}")
         if rendered:
             return "".join(rendered)
