@@ -10,19 +10,10 @@ class _LineEditPopupFilter(QObject):
     def __init__(self, combo: QComboBox):
         super().__init__(combo)
         self.combo = combo
-        self._pressed_selection = None
 
     def eventFilter(self, watched, event):
-        if event.type() == QEvent.Type.MouseButtonPress:
-            edit = self.combo.lineEdit()
-            if edit is not None:
-                self._pressed_selection = (edit.selectionStart(), len(edit.selectedText()))
-            return False
-
         if event.type() == QEvent.Type.MouseButtonRelease:
             QTimer.singleShot(0, self._show_after_editing)
-            return False
-
         return False
 
     def _show_after_editing(self):
@@ -34,7 +25,7 @@ class _LineEditPopupFilter(QObject):
         edit = combo.lineEdit()
         if edit is None:
             return
-        # 用户拖选/双击形成选区时优先保留文本编辑，不主动弹候选。
+        # 拖选/双击形成选区时优先保留文本编辑，不主动弹候选。
         if edit.hasSelectedText():
             return
         _show_filtered_popup(combo)
@@ -52,10 +43,8 @@ def _hide_all_popups(combo: QComboBox):
     except RuntimeError:
         return
     comp = combo.completer()
-    if comp is not None:
-        popup = comp.popup()
-        if popup is not None:
-            popup.hide()
+    if comp is not None and comp.popup() is not None:
+        comp.popup().hide()
 
 
 def _show_filtered_popup(combo: QComboBox):
@@ -73,6 +62,7 @@ def _show_filtered_popup(combo: QComboBox):
     comp.complete()
 
     # complete() 只负责显示候选，不能改变用户刚完成的光标/选区。
+    edit.setFocus(Qt.FocusReason.MouseFocusReason)
     edit.setCursorPosition(min(cursor, len(edit.text())))
     if sel_start >= 0 and sel_len > 0:
         edit.setSelection(sel_start, sel_len)
@@ -80,17 +70,14 @@ def _show_filtered_popup(combo: QComboBox):
 
 def _commit_candidate(combo: QComboBox, value):
     text = _completion_text(value).strip()
-    if not text:
-        _hide_all_popups(combo)
-        return
-
     combo._search_combo_suppress_popup = True
     try:
-        idx = combo.findText(text, Qt.MatchFlag.MatchExactly)
-        if idx >= 0:
-            # 真实选择必须落在 QComboBox 的 currentIndex 上，避免显示值与实际值不一致。
-            combo.setCurrentIndex(idx)
-        combo.setEditText(text)
+        if text:
+            idx = combo.findText(text, Qt.MatchFlag.MatchExactly)
+            if idx >= 0:
+                # 候选选择必须成为真正 currentIndex，不能只改 lineEdit 文字。
+                combo.setCurrentIndex(idx)
+            combo.setEditText(text)
         _hide_all_popups(combo)
     finally:
         QTimer.singleShot(80, lambda c=combo: setattr(c, "_search_combo_suppress_popup", False))
@@ -103,10 +90,10 @@ def configure_search_combo(combo: QComboBox):
 
     combo.setEditable(True)
     combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-
-    # 移除历史 V2 的 FocusIn/MousePress 立即弹层过滤器，避免第一次点击抢走光标编辑体验。
-    old_filter = getattr(combo, "_contains_popup_filter", None)
     edit = combo.lineEdit()
+
+    # 移除历史 V2 的 FocusIn/MousePress 立即弹层过滤器，避免第一次点击抢光标。
+    old_filter = getattr(combo, "_contains_popup_filter", None)
     if edit is not None and old_filter is not None:
         try:
             edit.removeEventFilter(old_filter)
@@ -121,14 +108,22 @@ def configure_search_combo(combo: QComboBox):
     else:
         model.setStringList(values)
 
-    completer = QCompleter(model, combo)
-    completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-    completer.setFilterMode(Qt.MatchFlag.MatchContains)
-    completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-    combo.setCompleter(completer)
+    completer = getattr(combo, "_unified_completer", None)
+    if completer is None:
+        completer = QCompleter(model, combo)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        completer.activated.connect(lambda value, c=combo: _commit_candidate(c, value))
+        combo._unified_completer = completer
+    else:
+        completer.setModel(model)
+
+    if combo.completer() is not completer:
+        combo.setCompleter(completer)
     combo._search_model = model  # 兼容旧代码更新候选模型。
 
-    # 阻止旧 V6 选择后“摘掉 completer”的逻辑再次介入；旧逻辑仍可负责 hide，但不再改控件结构。
+    # 旧 V6 可以继续 hide，但不再允许它摘掉 completer。
     combo._v6_detached_completer = True
 
     popup_filter = getattr(combo, "_unified_popup_filter", None)
@@ -147,19 +142,17 @@ def configure_search_combo(combo: QComboBox):
         edit.textEdited.connect(on_text_edited)
         combo._unified_text_wired = True
 
-    # completer 每次重建都重新绑定，真正的候选选择由这里提交到 QComboBox。
-    completer.activated.connect(lambda value, c=combo: _commit_candidate(c, value))
-
     if not getattr(combo, "_unified_combo_wired", False):
-        # 右侧箭头的原生列表由 QComboBox 自己设置 currentIndex，这里只统一收尾关闭。
+        # 右侧箭头原生列表由 QComboBox 自己提交 currentIndex，这里只统一关闭。
         combo.activated.connect(lambda *_args, c=combo: _hide_all_popups(c))
         combo._unified_combo_wired = True
 
+    combo._unified_search_configured = True
     return combo
 
 
 def set_search_choices(combo: QComboBox, choices, current=None):
-    """更新完整候选，保留当前自由文本，并保持 native 列表与 completer 模型一致。"""
+    """更新完整候选，保留自由文本，并保持箭头列表与搜索模型一致。"""
     if combo is None:
         return
     values = list(dict.fromkeys(str(x) for x in (choices or []) if str(x)))
