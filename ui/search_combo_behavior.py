@@ -43,8 +43,10 @@ def _hide_all_popups(combo: QComboBox):
     except RuntimeError:
         return
     comp = combo.completer()
-    if comp is not None and comp.popup() is not None:
-        comp.popup().hide()
+    if comp is not None:
+        popup = comp.popup()
+        if popup is not None:
+            popup.hide()
 
 
 def _show_filtered_popup(combo: QComboBox):
@@ -68,19 +70,50 @@ def _show_filtered_popup(combo: QComboBox):
         edit.setSelection(sel_start, sel_len)
 
 
+def _finish_commit(combo: QComboBox, text: str, idx: int):
+    """popup 已关闭后再通知业务层，避免 JOIN 联动刷新把候选重新打开。"""
+    try:
+        _hide_all_popups(combo)
+        # 业务层既有 currentTextChanged，也有 activated 监听；统一在 popup 收起后通知。
+        combo.currentTextChanged.emit(text)
+        if idx >= 0:
+            combo.activated.emit(idx)
+    except RuntimeError:
+        return
+
+    # JOIN/字段刷新链可能包含 0ms/80ms 延迟，再补两次关闭，确保不会残留旧候选层。
+    QTimer.singleShot(20, lambda c=combo: _hide_all_popups(c))
+    QTimer.singleShot(100, lambda c=combo: _hide_all_popups(c))
+    QTimer.singleShot(180, lambda c=combo: setattr(c, "_search_combo_suppress_popup", False))
+
+
 def _commit_candidate(combo: QComboBox, value):
+    """候选选择：先真实提交并关闭 popup，再触发所有业务联动。"""
     text = _completion_text(value).strip()
     combo._search_combo_suppress_popup = True
+
+    if not text:
+        _hide_all_popups(combo)
+        QTimer.singleShot(100, lambda c=combo: setattr(c, "_search_combo_suppress_popup", False))
+        return
+
+    # 关键：提交 currentIndex/currentText 时先阻断 combo 的业务信号。
+    # 旧 JOIN 逻辑如果在 setCurrentIndex 期间同步刷新，会把 completer/popup 状态重新刷出来。
+    old_block = combo.blockSignals(True)
     try:
-        if text:
-            idx = combo.findText(text, Qt.MatchFlag.MatchExactly)
-            if idx >= 0:
-                # 候选选择必须成为真正 currentIndex，不能只改 lineEdit 文字。
-                combo.setCurrentIndex(idx)
-            combo.setEditText(text)
+        idx = combo.findText(text, Qt.MatchFlag.MatchExactly)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        else:
+            # 允许自由文本，不强行改成第一项。
+            combo.setCurrentIndex(-1)
+        combo.setEditText(text)
         _hide_all_popups(combo)
     finally:
-        QTimer.singleShot(80, lambda c=combo: setattr(c, "_search_combo_suppress_popup", False))
+        combo.blockSignals(old_block)
+
+    # 下一轮事件循环再通知业务层，此时候选层已经完成关闭。
+    QTimer.singleShot(0, lambda c=combo, t=text, i=idx: _finish_commit(c, t, i))
 
 
 def configure_search_combo(combo: QComboBox):
@@ -143,7 +176,7 @@ def configure_search_combo(combo: QComboBox):
         combo._unified_text_wired = True
 
     if not getattr(combo, "_unified_combo_wired", False):
-        # 右侧箭头原生列表由 QComboBox 自己提交 currentIndex，这里只统一关闭。
+        # 右侧箭头原生列表由 QComboBox 自己提交 currentIndex；选择后立即关闭搜索候选层。
         combo.activated.connect(lambda *_args, c=combo: _hide_all_popups(c))
         combo._unified_combo_wired = True
 
@@ -161,7 +194,12 @@ def set_search_choices(combo: QComboBox, choices, current=None):
     old = combo.blockSignals(True)
     combo.clear()
     combo.addItems(values)
-    combo.setEditText(text)
+    idx = combo.findText(text, Qt.MatchFlag.MatchExactly)
+    if idx >= 0:
+        combo.setCurrentIndex(idx)
+    else:
+        combo.setCurrentIndex(-1)
+        combo.setEditText(text)
     combo.blockSignals(old)
 
     configure_search_combo(combo)
