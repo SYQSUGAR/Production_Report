@@ -64,6 +64,58 @@ def _install_chinese_qt_translation(app: QApplication):
     app._qt_zh_translators = translators
 
 
+def _install_unified_combo_style(app: QApplication):
+    """所有 QComboBox 统一为“完整输入框 + 右侧轻量箭头”的样式。
+
+    这里不再给右侧下拉区单独画一个按钮框。可输入型 QComboBox 的内部
+    QLineEdit 也去掉第二层边框，使其和新的 SearchDropDown / 时间字段保持
+    同一种一体式观感。
+    """
+    app.setStyleSheet(
+        (app.styleSheet() or "")
+        + """
+        QComboBox {
+            border: 1px solid palette(mid);
+            padding: 1px 22px 1px 4px;
+            background: palette(base);
+            min-height: 20px;
+        }
+        QComboBox:hover {
+            border-color: palette(dark);
+        }
+        QComboBox:focus {
+            border-color: palette(highlight);
+        }
+        QComboBox:disabled {
+            color: palette(mid);
+            background: palette(window);
+        }
+        QComboBox::drop-down {
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 20px;
+            border: none;
+            background: transparent;
+        }
+        QComboBox::drop-down:hover {
+            background: transparent;
+        }
+        QComboBox QLineEdit {
+            border: none;
+            padding: 0px;
+            margin: 0px;
+            background: transparent;
+        }
+        QComboBox QAbstractItemView {
+            border: 1px solid palette(mid);
+            background: palette(base);
+            selection-background-color: palette(highlight);
+            selection-color: palette(highlighted-text);
+        }
+        """
+    )
+
+
 def _tighten_database_sidebar(window):
     """JOIN 重写后卡片不再需要 560px 侧栏，把空间还给中间表格。"""
     right = getattr(window, "_right_panel_container", None)
@@ -93,6 +145,7 @@ def main():
     font.setFamilies(["Microsoft YaHei", "宋体"])
     font.setPointSize(10)
     app.setFont(font)
+    _install_unified_combo_style(app)
 
     try:
         # V2/V3/V4 仅保留数据库面板、数据来源模式、数据返回和预览窗口等兼容底座。
