@@ -2,13 +2,14 @@
 
 from copy import deepcopy
 
-from PyQt6.QtCore import QDateTime, Qt, QEvent, QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QDateTime, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QGroupBox, QFormLayout, QCheckBox, QComboBox,
-    QDateTimeEdit, QLabel, QCompleter,
+    QDateTimeEdit, QLabel,
 )
 
 from models.time_binding import TimeBinding, TimeRangeType, TimeMode
+from ui.join_editor_widget import SearchDropDown
 
 
 _RANGE_LABELS = {
@@ -19,51 +20,6 @@ _RANGE_LABELS = {
     TimeRangeType.FIXED: "固定",
 }
 _LABEL_TO_RANGE = {v: k for k, v in _RANGE_LABELS.items()}
-
-
-class _TimeFieldPopupFilter(QObject):
-    """时间字段下拉框：点击/聚焦展开，输入时使用本地候选匹配。"""
-
-    def __init__(self, combo, parent=None):
-        super().__init__(parent or combo)
-        self._combo = combo
-
-    def eventFilter(self, watched, event):
-        if event.type() in (QEvent.Type.FocusIn, QEvent.Type.MouseButtonPress):
-            QTimer.singleShot(0, self._show)
-        return False
-
-    def _show(self):
-        if self._combo.isEnabled() and self._combo.isVisible():
-            self._combo.showPopup()
-
-
-class _TimeFieldChoiceCloseFilter(QObject):
-    """时间字段候选被点击/回车选中后立即收起。"""
-
-    def __init__(self, combo):
-        super().__init__(combo)
-        self._combo = combo
-
-    def close_popup(self):
-        try:
-            self._combo.hidePopup()
-        except RuntimeError:
-            return
-        comp = self._combo.completer()
-        if comp is not None and comp.popup() is not None:
-            comp.popup().hide()
-
-    def eventFilter(self, watched, event):
-        if event.type() == QEvent.Type.MouseButtonRelease:
-            QTimer.singleShot(0, self.close_popup)
-        elif event.type() == QEvent.Type.KeyPress and event.key() in (
-            Qt.Key.Key_Return,
-            Qt.Key.Key_Enter,
-            Qt.Key.Key_Tab,
-        ):
-            QTimer.singleShot(0, self.close_popup)
-        return False
 
 
 class TimeBindingPanel(QWidget):
@@ -111,45 +67,11 @@ class TimeBindingPanel(QWidget):
         self._enabled.stateChanged.connect(self._changed)
         form.addRow(self._enabled)
 
-        # 时间字段也是数据库字段，使用与数据库侧栏一致的可输入下拉框。
-        self._time_field = QComboBox()
-        self._time_field.setEditable(True)
-        self._time_field.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self._time_field.lineEdit().setPlaceholderText("选择或输入时间字段")
-        completer = self._time_field.completer()
-        if completer is not None:
-            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-            completer.setFilterMode(Qt.MatchFlag.MatchContains)
-            completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-        self._time_field_filter = _TimeFieldPopupFilter(self._time_field, self._time_field)
-        self._time_field.lineEdit().installEventFilter(self._time_field_filter)
-        self._time_field.lineEdit().textEdited.connect(
-            lambda _text: QTimer.singleShot(
-                0,
-                lambda: self._time_field.completer().complete()
-                if self._time_field.completer() is not None else None,
-            )
-        )
-
-        # 与数据库绑定区域统一：无论鼠标点击补全候选、按 Enter 选中，都会立即关闭候选层。
-        self._time_field_choice_filter = _TimeFieldChoiceCloseFilter(self._time_field)
-        if completer is not None:
-            completer.activated.connect(
-                lambda *_: QTimer.singleShot(0, self._time_field_choice_filter.close_popup)
-            )
-            popup = completer.popup()
-            if popup is not None:
-                popup.installEventFilter(self._time_field_choice_filter)
-                if popup.viewport() is not None:
-                    popup.viewport().installEventFilter(self._time_field_choice_filter)
-        self._time_field.activated.connect(
-            lambda *_: QTimer.singleShot(0, self._time_field_choice_filter.close_popup)
-        )
-        self._time_field.lineEdit().returnPressed.connect(
-            lambda: QTimer.singleShot(0, self._time_field_choice_filter.close_popup)
-        )
-
-        self._time_field.currentTextChanged.connect(self._changed)
+        # 与新 JOIN 表名/字段名完全使用同一套单 popup 搜索输入控件。
+        # 第一次点击先完成光标定位/选字，MouseRelease 后再展示候选；选中后立即关闭。
+        self._time_field = SearchDropDown(self._config_group)
+        self._time_field.setPlaceholderText("选择或输入时间字段")
+        self._time_field.valueChanged.connect(self._changed)
         form.addRow("时间字段:", self._time_field)
 
         self._range_type = QComboBox()
@@ -180,21 +102,7 @@ class TimeBindingPanel(QWidget):
 
     def set_field_choices(self, fields: list[str]):
         """更新缓存字段候选，不访问数据库，并保留当前输入。"""
-        current = self._time_field.currentText()
-        self._time_field.blockSignals(True)
-        self._time_field.clear()
-        self._time_field.addItems(list(dict.fromkeys(fields or [])))
-        self._time_field.setCurrentText(current)
-        self._time_field.blockSignals(False)
-
-        # clear/addItems 后 Qt 可能替换 completer/popup，再次确保新 popup 也安装关闭过滤器。
-        completer = self._time_field.completer()
-        if completer is not None:
-            popup = completer.popup()
-            if popup is not None:
-                popup.installEventFilter(self._time_field_choice_filter)
-                if popup.viewport() is not None:
-                    popup.viewport().installEventFilter(self._time_field_choice_filter)
+        self._time_field.set_choices(list(dict.fromkeys(fields or [])), preserve=True)
 
     def set_selected_cells(self, cells: list):
         self._selected_cells = list(dict.fromkeys(cells or []))
@@ -267,7 +175,7 @@ class TimeBindingPanel(QWidget):
         try:
             binding = qb.time_binding if qb else TimeBinding()
             self._enabled.setChecked(binding.enabled)
-            self._time_field.setCurrentText(binding.time_field)
+            self._time_field.setCurrentText(binding.time_field, emit=False)
             self._range_type.setCurrentText(_RANGE_LABELS.get(binding.range_type, "日"))
             self._mode.setCurrentIndex(1 if binding.mode == TimeMode.CURRENT else 0)
             if binding.fixed_start:
