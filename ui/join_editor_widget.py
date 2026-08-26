@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QEvent, QPoint, QSignalBlocker, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtCore import QEvent, QPoint, QRect, QSignalBlocker, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QKeyEvent, QPainter
 from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -21,6 +21,8 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QSizePolicy,
+    QStyle,
+    QStyleOption,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -40,6 +42,42 @@ class _ChoiceLineEdit(QLineEdit):
         return super().event(event)
 
 
+class _ComboArrowButton(QToolButton):
+    """只复用当前 Qt/系统 QComboBox 的下拉箭头绘制，不自定义另一套三角样式。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAutoRaise(False)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFixedWidth(20)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        # 外框交给整个 SearchDropDown 视觉承担，按钮本身只保留与 QComboBox 类似的右侧区域。
+        self.setStyleSheet(
+            "QToolButton { border: 0; border-left: 1px solid palette(mid); padding: 0; background: palette(base); }"
+            "QToolButton:hover { background: palette(alternate-base); }"
+            "QToolButton:pressed { background: palette(midlight); }"
+        )
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        opt = QStyleOption()
+        opt.initFrom(self)
+        # QComboBox 的下拉箭头最终也是由当前 QStyle 的 PE_IndicatorArrowDown 绘制。
+        side = 9
+        opt.rect = QRect(
+            max(0, (self.width() - side) // 2),
+            max(0, (self.height() - side) // 2),
+            side,
+            side,
+        )
+        self.style().drawPrimitive(
+            QStyle.PrimitiveElement.PE_IndicatorArrowDown,
+            opt,
+            painter,
+            self,
+        )
+
+
 class SearchDropDown(QWidget):
     """可输入、可搜索、只有一个候选层的下拉输入框。
 
@@ -47,7 +85,7 @@ class SearchDropDown(QWidget):
     - MousePress/Release 先交给 QLineEdit，第一次点击即可定位光标或选择文字；
     - 普通单击释放后再显示过滤候选；拖选/双击选字时不主动弹候选；
     - 输入文字时 contains / 大小写不敏感过滤；
-    - 右侧系统风格箭头打开同一个 popup，并显示完整候选；
+    - 右侧箭头使用当前 Qt/系统 QComboBox 的同款箭头，并打开同一个 popup 显示完整候选；
     - 鼠标点击或键盘 Enter 选中后立即提交并关闭；
     - 允许自由文本，不会自动替换成第一项。
     """
@@ -68,11 +106,7 @@ class SearchDropDown(QWidget):
         self.edit.setClearButtonEnabled(False)
         lay.addWidget(self.edit, 1)
 
-        self.arrow = QToolButton(self)
-        self.arrow.setArrowType(Qt.ArrowType.DownArrow)
-        self.arrow.setAutoRaise(False)
-        self.arrow.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.arrow.setFixedWidth(20)
+        self.arrow = _ComboArrowButton(self)
         self.arrow.setToolTip("显示全部候选")
         lay.addWidget(self.arrow)
 
