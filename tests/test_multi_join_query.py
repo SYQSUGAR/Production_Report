@@ -9,6 +9,7 @@ def _binding():
         qualify_database=True,
         table_name="equipment_status",
         source_alias="t1",
+        source_mode="join",
         field_name="t2.equipment_name",
         joins=[
             {
@@ -62,3 +63,27 @@ def test_join_validation_rejects_missing_on_condition():
     qb = _binding()
     qb.joins[0]["conditions"] = []
     assert "尚未设置关联条件" in qb.validate_joins()
+
+
+def test_source_mode_round_trip_and_legacy_inference():
+    qb = _binding()
+    restored = QueryBinding.from_dict(qb.to_dict())
+    assert restored.source_mode == "join"
+
+    legacy = qb.to_dict()
+    legacy.pop("source_mode")
+    assert QueryBinding.from_dict(legacy).source_mode == "join"
+
+    single = QueryBinding.from_dict({"table_name": "equipment_status", "joins": []})
+    assert single.source_mode == "single"
+
+
+def test_join_on_skips_incomplete_condition_without_leading_connector():
+    qb = _binding()
+    qb.joins[0]["conditions"] = [
+        {"connector": "AND", "left": "", "op": "=", "right": "t2.missing"},
+        {"connector": "OR", "left": "t1.equipment_id", "op": "=", "right": "t2.equipment_id"},
+    ]
+    sql = qb.build_sql()
+    assert " ON t1.equipment_id = t2.equipment_id" in sql
+    assert " ON OR " not in sql
