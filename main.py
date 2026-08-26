@@ -64,6 +64,22 @@ def _install_chinese_qt_translation(app: QApplication):
     app._qt_zh_translators = translators
 
 
+def _tighten_database_sidebar(window):
+    """JOIN 重写后卡片不再需要 560px 侧栏，把空间还给中间表格。"""
+    right = getattr(window, "_right_panel_container", None)
+    if right is not None:
+        right.setMinimumWidth(420)
+        right.setMaximumWidth(680)
+
+    splitter = getattr(window, "_main_splitter", None)
+    if splitter is not None:
+        splitter.setSizes([320, 980, 460])
+        try:
+            splitter.configure_side("right", panel_index=2, expanded_width=460)
+        except Exception:
+            pass
+
+
 def main():
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
@@ -90,6 +106,7 @@ def main():
         install_database_binding_v4_refine()
         install_database_binding_join_rewrite()
         window = WorkspaceWindow()
+        _tighten_database_sidebar(window)
         window.show()
         return app.exec()
     except Exception:
