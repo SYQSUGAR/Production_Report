@@ -1,7 +1,7 @@
 """独立的表关联编辑器。
 
-这套控件不复用旧 DatabaseBindingPanel/V2-V7 的 JOIN QComboBox、QCompleter、row dict
-和后装饰布局。JOIN 区域只通过结构化数据与外部数据库绑定面板交互。
+JOIN 区域完全独立于旧 DatabaseBindingPanel/V2-V7 的 editable QComboBox/QCompleter。
+表名与字段名使用单一 popup 的 SearchDropDown；整组关联操作集中在底部操作栏。
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -42,16 +41,15 @@ class _ChoiceLineEdit(QLineEdit):
 
 
 class SearchDropDown(QWidget):
-    """只有一层候选 popup 的可输入搜索框。
+    """可输入、可搜索、只有一个候选层的下拉输入框。
 
-    - 输入框点击：先完成 QLineEdit 原生光标定位，MouseRelease 后再显示过滤候选。
-    - 输入文字：contains / 大小写不敏感过滤。
-    - 右侧箭头：同一个 popup 显示完整候选。
-    - 点击候选或 Enter：提交唯一真实值后立即关闭 popup。
-    - 允许自由文本；不会偷偷改成第一项。
-
-    这里故意不用 editable QComboBox + QCompleter，避免两套 popup、currentIndex 与
-    lineEdit 文本相互覆盖。
+    规则：
+    - MousePress/Release 先交给 QLineEdit，第一次点击即可定位光标或选择文字；
+    - 普通单击释放后再显示过滤候选；拖选/双击选字时不主动弹候选；
+    - 输入文字时 contains / 大小写不敏感过滤；
+    - 右侧系统风格箭头打开同一个 popup，并显示完整候选；
+    - 鼠标点击或键盘 Enter 选中后立即提交并关闭；
+    - 允许自由文本，不会自动替换成第一项。
     """
 
     valueChanged = pyqtSignal(str)
@@ -61,7 +59,6 @@ class SearchDropDown(QWidget):
         super().__init__(parent)
         self._choices: list[str] = []
         self._committed_text = ""
-        self._show_all_once = False
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -72,19 +69,24 @@ class SearchDropDown(QWidget):
         lay.addWidget(self.edit, 1)
 
         self.arrow = QToolButton(self)
-        self.arrow.setText("▼")
+        self.arrow.setArrowType(Qt.ArrowType.DownArrow)
         self.arrow.setAutoRaise(False)
         self.arrow.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.arrow.setFixedWidth(22)
+        self.arrow.setFixedWidth(20)
+        self.arrow.setToolTip("显示全部候选")
         lay.addWidget(self.arrow)
 
+        # 唯一的候选 popup。不使用 QComboBox 原生 popup，也不使用 QCompleter。
         self.popup = QFrame(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         self.popup.setFrameShape(QFrame.Shape.StyledPanel)
+        self.popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.popup.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
         popup_lay = QVBoxLayout(self.popup)
         popup_lay.setContentsMargins(0, 0, 0, 0)
         popup_lay.setSpacing(0)
         self.list = QListWidget(self.popup)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         popup_lay.addWidget(self.list)
 
         self.edit.installEventFilter(self)
@@ -97,26 +99,36 @@ class SearchDropDown(QWidget):
     def eventFilter(self, watched, event):
         if watched is self.edit:
             if event.type() == QEvent.Type.MouseButtonRelease:
-                # MousePress/Release 先完全交给 QLineEdit，使第一次点击即可定位光标。
+                # 先完成 QLineEdit 自己的光标定位/文字选择，再决定是否弹候选。
                 QTimer.singleShot(0, self._show_after_mouse_release)
-            elif event.type() == QEvent.Type.KeyPress:
-                key_event = event
-                if isinstance(key_event, QKeyEvent):
-                    if key_event.key() == Qt.Key.Key_Down:
+            elif event.type() == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
+                key = event.key()
+                if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+                    if not self.popup.isVisible():
                         self.show_filtered()
-                        if self.list.count():
-                            self.list.setCurrentRow(0)
-                            self.list.setFocus()
+                    if self.list.count():
+                        row = self.list.currentRow()
+                        if row < 0:
+                            row = 0
+                        elif key == Qt.Key.Key_Down:
+                            row = min(self.list.count() - 1, row + 1)
+                        else:
+                            row = max(0, row - 1)
+                        self.list.setCurrentRow(row)
+                    return True
+                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.popup.isVisible():
+                    item = self.list.currentItem()
+                    if item is not None:
+                        self._commit_item(item)
                         return True
-                    if key_event.key() == Qt.Key.Key_Escape and self.popup.isVisible():
-                        self.hide_popup()
-                        return True
+                if key == Qt.Key.Key_Escape and self.popup.isVisible():
+                    self.hide_popup()
+                    return True
         return super().eventFilter(watched, event)
 
     def _show_after_mouse_release(self):
         if not self.isEnabled() or not self.isVisible():
             return
-        # 拖选/双击选中文字时优先保留编辑动作，不主动弹候选。
         if self.edit.hasSelectedText():
             return
         self.show_filtered()
@@ -126,7 +138,6 @@ class SearchDropDown(QWidget):
         self.show_filtered()
 
     def _on_editing_finished(self):
-        # 点击 popup 项时 QLineEdit 会先失焦，此时不要抢先提交自由文本。
         if self.popup.isVisible():
             return
         text = self.edit.text().strip()
@@ -149,6 +160,11 @@ class SearchDropDown(QWidget):
             item = QListWidgetItem(value)
             item.setToolTip(value)
             self.list.addItem(item)
+        current = self.edit.text().strip()
+        for row in range(self.list.count()):
+            if self.list.item(row).text() == current:
+                self.list.setCurrentRow(row)
+                break
         return values
 
     def _show_popup(self, show_all=False):
@@ -162,11 +178,10 @@ class SearchDropDown(QWidget):
         row_h = max(self.list.sizeHintForRow(0), 22)
         height = min(260, max(28, row_h * min(len(values), 9) + 4))
         self.popup.resize(width, height)
-        global_pos = self.mapToGlobal(QPoint(0, self.height()))
-        self.popup.move(global_pos)
+        self.popup.move(self.mapToGlobal(QPoint(0, self.height())))
         self.popup.show()
         self.popup.raise_()
-        # popup 出现后仍把输入焦点交给 QLineEdit，保证继续输入/退格自然。
+        # popup 不接管焦点，输入框仍可直接继续输入、删除和移动光标。
         self.edit.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def show_filtered(self):
@@ -179,9 +194,8 @@ class SearchDropDown(QWidget):
         self.popup.hide()
 
     def _commit_item(self, item):
-        if item is None:
-            return
-        self._commit_text(item.text())
+        if item is not None:
+            self._commit_text(item.text())
 
     def _commit_text(self, text: str, emit=True):
         text = str(text or "").strip()
@@ -189,7 +203,6 @@ class SearchDropDown(QWidget):
             self.edit.setText(text)
         self._committed_text = text
         self.hide_popup()
-        # 点击候选后明确把焦点还给输入框，但不重新弹 popup。
         self.edit.setFocus(Qt.FocusReason.OtherFocusReason)
         self.edit.setCursorPosition(len(text))
         if emit:
@@ -255,7 +268,7 @@ class JoinConditionRow(QWidget):
         lay.addWidget(self.right, 1)
 
         self.remove = QPushButton("×", self)
-        self.remove.setFixedSize(28, 24)
+        self.remove.setFixedSize(26, 24)
         self.remove.setToolTip("删除这一条关联条件")
         lay.addWidget(self.remove)
 
@@ -299,24 +312,22 @@ class JoinConditionRow(QWidget):
 
 class JoinCard(QWidget):
     changed = pyqtSignal(object)
-    moveRequested = pyqtSignal(object, int)
-    removeRequested = pyqtSignal(object)
 
     def __init__(self, join_types, parent=None):
         super().__init__(parent)
         self.index = 0
         self.conditions: list[JoinConditionRow] = []
 
-        shell = QHBoxLayout(self)
-        shell.setContentsMargins(0, 0, 0, 0)
-        shell.setSpacing(3)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
         self.frame = QFrame(self)
         self.frame.setFrameShape(QFrame.Shape.StyledPanel)
-        shell.addWidget(self.frame, 1)
-        root = QVBoxLayout(self.frame)
-        root.setContentsMargins(3, 4, 3, 4)
-        root.setSpacing(4)
+        root.addWidget(self.frame)
+        frame_root = QVBoxLayout(self.frame)
+        frame_root.setContentsMargins(3, 4, 3, 4)
+        frame_root.setSpacing(4)
 
         top = QHBoxLayout()
         top.setSpacing(4)
@@ -328,7 +339,7 @@ class JoinCard(QWidget):
         self.join_type.setMaximumWidth(120)
         top.addWidget(self.join_type)
         top.addStretch(1)
-        root.addLayout(top)
+        frame_root.addLayout(top)
 
         table_row = QHBoxLayout()
         table_row.setSpacing(2)
@@ -344,45 +355,22 @@ class JoinCard(QWidget):
         table_row.addWidget(self.right_name_label)
         self.right_table = SearchDropDown(self.frame)
         table_row.addWidget(self.right_table, 1)
-        root.addLayout(table_row)
+        frame_root.addLayout(table_row)
 
         self.conditions_box = QWidget(self.frame)
         self.conditions_layout = QVBoxLayout(self.conditions_box)
         self.conditions_layout.setContentsMargins(0, 0, 0, 0)
         self.conditions_layout.setSpacing(3)
-        root.addWidget(self.conditions_box)
+        frame_root.addWidget(self.conditions_box)
 
         self.add_condition = QPushButton("+ 条件", self.frame)
         self.add_condition.setMaximumWidth(82)
-        root.addWidget(self.add_condition, 0, Qt.AlignmentFlag.AlignLeft)
-
-        controls = QWidget(self)
-        controls.setFixedWidth(32)
-        ctrl = QVBoxLayout(controls)
-        ctrl.setContentsMargins(1, 2, 1, 2)
-        ctrl.setSpacing(3)
-        ctrl.addStretch(1)
-        self.up = QPushButton("↑", controls)
-        self.down = QPushButton("↓", controls)
-        self.remove = QPushButton("×", controls)
-        for button in (self.up, self.down, self.remove):
-            button.setFixedSize(30, 24)
-            ctrl.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
-        ctrl.addStretch(1)
-        shell.addWidget(controls)
-
-        self.up.setToolTip("整组关联上移")
-        self.down.setToolTip("整组关联下移")
-        self.remove.setToolTip("删除整组关联")
+        frame_root.addWidget(self.add_condition, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.join_type.currentTextChanged.connect(lambda *_: self.changed.emit(self))
         self.left_table.valueChanged.connect(lambda *_: self.changed.emit(self))
         self.right_table.valueChanged.connect(lambda *_: self.changed.emit(self))
         self.add_condition.clicked.connect(self._add_condition_clicked)
-        self.up.clicked.connect(lambda: self.moveRequested.emit(self, -1))
-        self.down.clicked.connect(lambda: self.moveRequested.emit(self, 1))
-        self.remove.clicked.connect(lambda: self.removeRequested.emit(self))
-
         self.add_condition_row()
 
     def set_index(self, index: int, count: int, source_text: str):
@@ -392,11 +380,8 @@ class JoinCard(QWidget):
         self.left_name_label.setText("左表名:" if first else "左侧结果:")
         self.left_table.setVisible(first)
         self.left_result.setVisible(not first)
-        if first:
-            if source_text and self.left_table.currentText() != source_text:
-                self.left_table.setCurrentText(source_text, emit=False)
-        self.up.setEnabled(index > 0)
-        self.down.setEnabled(index < count - 1)
+        if first and source_text and self.left_table.currentText() != source_text:
+            self.left_table.setCurrentText(source_text, emit=False)
         for idx, cond in enumerate(self.conditions):
             cond.set_first(idx == 0)
 
@@ -476,6 +461,7 @@ class JoinEditorWidget(QGroupBox):
         self.source_text = ""
         self.db_type = "mysql"
         self._loading = False
+        self._current_index = -1
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 8, 6, 6)
@@ -490,10 +476,36 @@ class JoinEditorWidget(QGroupBox):
         self.cards_layout.setSpacing(6)
         root.addWidget(self.cards_box)
 
+        # 整组关联操作集中到底部，不再占用每张卡片的横向空间。
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(3)
         self.add_join = QPushButton("+ 添加关联", self)
         self.add_join.clicked.connect(self._add_join_clicked)
-        root.addWidget(self.add_join)
+        actions.addWidget(self.add_join, 1)
+
+        self.group_selector = QComboBox(self)
+        self.group_selector.setMinimumWidth(82)
+        self.group_selector.setMaximumWidth(105)
+        self.group_selector.setToolTip("选择要上移、下移或删除的整组关联")
+        self.group_selector.currentIndexChanged.connect(self._selector_changed)
+        actions.addWidget(self.group_selector)
+
+        self.move_up = QPushButton("↑", self)
+        self.move_down = QPushButton("↓", self)
+        self.remove_group = QPushButton("×", self)
+        for button in (self.move_up, self.move_down, self.remove_group):
+            button.setFixedSize(28, 24)
+            actions.addWidget(button)
+        self.move_up.setToolTip("当前整组关联上移")
+        self.move_down.setToolTip("当前整组关联下移")
+        self.remove_group.setToolTip("删除当前整组关联")
+        self.move_up.clicked.connect(lambda: self._move_current(-1))
+        self.move_down.clicked.connect(lambda: self._move_current(1))
+        self.remove_group.clicked.connect(self._remove_current)
+        root.addLayout(actions)
         self._refresh_add_join_state()
+        self._refresh_group_controls()
 
     def _join_types(self):
         values = ["LEFT JOIN", "INNER JOIN", "RIGHT JOIN"]
@@ -552,8 +564,6 @@ class JoinEditorWidget(QGroupBox):
         self.cards.append(card)
         self.cards_layout.addWidget(card)
         card.changed.connect(self._card_changed)
-        card.moveRequested.connect(self._move_card)
-        card.removeRequested.connect(self._remove_card)
         card.set_table_choices(self.table_choices())
         if data:
             card.join_type.setCurrentText(str(data.get("type", "LEFT JOIN")))
@@ -562,17 +572,16 @@ class JoinEditorWidget(QGroupBox):
             if db and table.startswith(db + "."):
                 table = table[len(db) + 1 :]
             card.right_table.setCurrentText(self.display_table(db, table), emit=False)
-            # constructor 已有一条空条件，加载旧配置时先清掉再按实际数量创建。
             for cond in list(card.conditions):
                 card.conditions.remove(cond)
                 cond.setParent(None)
                 cond.deleteLater()
             conditions = list(data.get("conditions") or [])
             if not conditions and data.get("on"):
-                # legacy on 无法可靠拆解时保留一条待编辑条件。
                 conditions = [{}]
             for item in conditions or [{}]:
                 card.add_condition_row(item)
+        self._current_index = len(self.cards) - 1
         return card
 
     def _add_join_clicked(self):
@@ -582,40 +591,51 @@ class JoinEditorWidget(QGroupBox):
         self._new_card()
         self._refresh_all(emit=True)
 
-    def _remove_card(self, card):
-        if card not in self.cards:
-            return
-        self.cards.remove(card)
-        self.cards_layout.removeWidget(card)
-        card.setParent(None)
-        card.deleteLater()
-        self._refresh_all(emit=True)
+    def _selector_changed(self, index):
+        if 0 <= index < len(self.cards):
+            self._current_index = index
+        self._refresh_group_controls(sync_selector=False)
 
-    def _move_card(self, card, delta):
-        if card not in self.cards:
+    def _move_current(self, delta):
+        if not (0 <= self._current_index < len(self.cards)):
             return
-        old = self.cards.index(card)
+        old = self._current_index
         new = old + int(delta)
         if new < 0 or new >= len(self.cards):
             return
-        # source table 属于整个关联链，不随第一个卡片移动。
         if self.cards:
             first_source = self.cards[0].left_table.currentText().strip()
             if first_source:
                 self.source_text = first_source
-        self.cards.pop(old)
+        card = self.cards.pop(old)
         self.cards.insert(new, card)
         self.cards_layout.removeWidget(card)
         self.cards_layout.insertWidget(new, card)
+        self._current_index = new
+        self._refresh_all(emit=True)
+
+    def _remove_current(self):
+        if not (0 <= self._current_index < len(self.cards)):
+            return
+        card = self.cards.pop(self._current_index)
+        self.cards_layout.removeWidget(card)
+        card.setParent(None)
+        card.deleteLater()
+        if self.cards:
+            self._current_index = min(self._current_index, len(self.cards) - 1)
+        else:
+            self._current_index = -1
         self._refresh_all(emit=True)
 
     def _card_changed(self, card):
         if self._loading:
             return
-        if card in self.cards and self.cards.index(card) == 0:
-            text = card.left_table.currentText().strip()
-            if text:
-                self.source_text = text
+        if card in self.cards:
+            self._current_index = self.cards.index(card)
+            if self._current_index == 0:
+                text = card.left_table.currentText().strip()
+                if text:
+                    self.source_text = text
         self._refresh_all(emit=True)
 
     def _sources_before(self, card_index: int):
@@ -640,7 +660,6 @@ class JoinEditorWidget(QGroupBox):
         for src in left_sources:
             for column in src.columns:
                 if column not in left_lookup:
-                    # JOIN 区域按用户要求只展示裸字段名；重名时按合并顺序取第一个来源。
                     left_choices.append(column)
                     left_lookup[column] = f"{src.alias}.{column}"
 
@@ -665,6 +684,7 @@ class JoinEditorWidget(QGroupBox):
             self._refresh_card_fields(idx, card)
         self.setTitle(f"表关联 JOIN（{count}）")
         self._refresh_add_join_state()
+        self._refresh_group_controls()
         fields, lookup = self.merged_fields()
         self.fieldsChanged.emit(fields, lookup)
         if emit and not self._loading:
@@ -679,6 +699,30 @@ class JoinEditorWidget(QGroupBox):
             )
         )
 
+    def _refresh_group_controls(self, sync_selector=True):
+        count = len(self.cards)
+        if count == 0:
+            self._current_index = -1
+        elif self._current_index < 0:
+            self._current_index = 0
+        elif self._current_index >= count:
+            self._current_index = count - 1
+
+        if sync_selector:
+            old = self.group_selector.blockSignals(True)
+            self.group_selector.clear()
+            for idx in range(count):
+                self.group_selector.addItem(f"第{idx + 1}组")
+            if self._current_index >= 0:
+                self.group_selector.setCurrentIndex(self._current_index)
+            self.group_selector.blockSignals(old)
+
+        has_current = 0 <= self._current_index < count
+        self.group_selector.setEnabled(count > 1)
+        self.move_up.setEnabled(has_current and self._current_index > 0)
+        self.move_down.setEnabled(has_current and self._current_index < count - 1)
+        self.remove_group.setEnabled(has_current)
+
     def clear(self):
         self._loading = True
         try:
@@ -688,6 +732,7 @@ class JoinEditorWidget(QGroupBox):
                 card.deleteLater()
             self.cards = []
             self.source_text = ""
+            self._current_index = -1
         finally:
             self._loading = False
         self._refresh_all(emit=False)
@@ -708,6 +753,9 @@ class JoinEditorWidget(QGroupBox):
                 self._new_card(item)
             if self.cards:
                 self.cards[0].left_table.setCurrentText(self.source_text, emit=False)
+                self._current_index = 0
+            else:
+                self._current_index = -1
         finally:
             self._loading = False
         self._refresh_all(emit=False)
@@ -719,14 +767,13 @@ class JoinEditorWidget(QGroupBox):
         joins = []
         for idx, card in enumerate(cards):
             rdb, rtable = self.resolve_table(card.right_table.currentText())
-            conditions = [cond.to_dict() for cond in card.conditions]
             joins.append({
                 "type": card.join_type.currentText() or "LEFT JOIN",
                 "database_name": rdb,
                 "schema_name": "",
                 "table_name": rtable,
                 "alias": f"t{idx + 2}",
-                "conditions": conditions,
+                "conditions": [cond.to_dict() for cond in card.conditions],
             })
         return {
             "database_name": sdb,
@@ -748,9 +795,7 @@ class JoinEditorWidget(QGroupBox):
         return f"第{index + 1}对：{left or '未选择'} ↔ {right or '未选择'}"
 
     def pair_complete(self, index: int):
-        if index < 0 or index >= len(self.cards):
-            return False
-        return self.cards[index].is_complete()
+        return 0 <= index < len(self.cards) and self.cards[index].is_complete()
 
     def chain_complete(self, through_index: int):
         if through_index < 0:
@@ -760,34 +805,33 @@ class JoinEditorWidget(QGroupBox):
         return all(card.is_complete() for card in self.cards[: through_index + 1])
 
     def merged_fields(self):
+        # _sources_before(len(cards)) 已经包含起始表以及每一张右表，不能再次追加最后一张右表。
         sources = self._sources_before(len(self.cards))
-        # 把最后一张右表也纳入候选。
-        if self.cards:
-            idx = len(self.cards) - 1
-            rdb, rtable = self.resolve_table(self.cards[-1].right_table.currentText())
-            if rtable:
-                sources.append(SourceRef(rdb, rtable, f"t{idx + 2}", self.columns(rdb, rtable)))
 
-        counts = {}
-        table_counts = {}
+        field_counts: dict[str, int] = {}
+        table_databases: dict[str, set[str]] = {}
         for src in sources:
-            table_counts[src.table] = table_counts.get(src.table, 0) + 1
+            table_databases.setdefault(src.table, set()).add(src.database)
             for col in src.columns:
-                counts[col] = counts.get(col, 0) + 1
+                field_counts[col] = field_counts.get(col, 0) + 1
 
-        choices = []
-        lookup = {}
+        choices: list[str] = []
+        lookup: dict[str, str] = {}
         for src in sources:
             for col in src.columns:
-                if counts.get(col, 0) == 1:
+                if field_counts.get(col, 0) <= 1:
+                    # 合并结果中字段唯一时只显示字段名。
                     display = col
                 else:
-                    source_name = src.table
-                    if table_counts.get(src.table, 0) > 1:
+                    # 字段重名：通常只补表名；只有同名表来自多个库时才补数据库名。
+                    if len(table_databases.get(src.table, set())) > 1:
                         source_name = f"{src.database}.{src.table}"
+                    else:
+                        source_name = src.table
                     display = f"{col} ({source_name})"
+                # 极少数情况下同一物理表被重复 JOIN，再用别名兜底，保证显示键唯一。
                 if display in lookup:
-                    display = f"{col} ({src.database}.{src.table})"
+                    display = f"{display} [{src.alias}]"
                 lookup[display] = f"{src.alias}.{col}" if len(sources) > 1 else col
                 choices.append(display)
         return choices, lookup
