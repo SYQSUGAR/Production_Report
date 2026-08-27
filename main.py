@@ -16,6 +16,7 @@ from ui.database_binding_v2_guard import install_database_binding_v2_guard
 from ui.database_binding_v2_finish import install_database_binding_v2_finish
 from ui.database_binding_v3_final import install_database_binding_v3_final
 from ui.database_binding_v4_refine import install_database_binding_v4_refine
+from ui.search_combo_behavior import install_search_combo_architecture
 from ui.database_binding_join_rewrite import install_database_binding_join_rewrite
 
 
@@ -95,15 +96,15 @@ def main():
     app.setFont(font)
 
     try:
-        # V2/V3/V4 仅保留数据库面板、数据来源模式、数据返回和预览窗口等兼容底座。
-        # JOIN 编辑区域最后由独立 JoinEditorWidget 完全替换；不再安装 V5/V6/V7，
-        # 避免旧的控件搬家、QCompleter 和 popup 逻辑继续干扰新 JOIN 输入框。
+        # V2/V3/V4 继续作为数据库绑定的兼容底座；其后立即安装统一 SearchComboBox，
+        # 覆盖旧 V2 的 QCompleter 搜索入口。所有可输入下拉框只保留 QComboBox 自己的 popup。
         install_db_connection_patch()
         install_database_binding_v2()
         install_database_binding_v2_guard()
         install_database_binding_v2_finish()
         install_database_binding_v3_final()
         install_database_binding_v4_refine()
+        install_search_combo_architecture()
         install_database_binding_join_rewrite()
         window = WorkspaceWindow()
         _tighten_database_sidebar(window)
