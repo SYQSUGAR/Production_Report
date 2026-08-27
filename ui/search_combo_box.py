@@ -45,15 +45,13 @@ class _SearchComboBehavior(QObject):
         self._choices = [combo.itemText(i) for i in range(combo.count())]
         self._committed_text = combo.currentText().strip()
 
-    # ------------------------------------------------------------------
-    # 事件：输入区域先完成光标定位/选字，释放鼠标后才弹候选。
-    # ------------------------------------------------------------------
     def eventFilter(self, watched, event):
         combo = self.combo
         edit = combo.lineEdit()
 
         if watched is edit:
             if event.type() == QEvent.Type.MouseButtonRelease:
+                # QLineEdit 先处理本次点击，下一轮事件循环才展开候选。
                 QTimer.singleShot(0, self._show_after_mouse_release)
             elif event.type() == QEvent.Type.ToolTip:
                 text = edit.text() if edit is not None else ""
@@ -64,7 +62,7 @@ class _SearchComboBehavior(QObject):
             return False
 
         if watched is combo and event.type() == QEvent.Type.MouseButtonPress:
-            # 点击原生 QComboBox 的右侧箭头：恢复完整候选，再让 Qt 自己打开 popup。
+            # 点击原生箭头时先恢复完整候选，再交给 QComboBox 自己展开。
             try:
                 opt = QStyleOptionComboBox()
                 combo.initStyleOption(opt)
@@ -74,8 +72,7 @@ class _SearchComboBehavior(QObject):
                     QStyle.SubControl.SC_ComboBoxArrow,
                     combo,
                 )
-                pos = event.position().toPoint()
-                if arrow_rect.contains(pos):
+                if arrow_rect.contains(event.position().toPoint()):
                     self._apply_visible_choices(self._choices, combo.currentText(), restore_edit_state=True)
             except Exception:
                 pass
@@ -90,14 +87,11 @@ class _SearchComboBehavior(QObject):
             return
         if not combo.isEnabled() or not combo.isVisible() or edit is None:
             return
-        # 拖选/双击选字优先，不主动弹候选。
+        # 拖选、双击选字形成选区时，优先保留文字编辑，不主动弹候选。
         if edit.hasSelectedText():
             return
         self.show_filtered()
 
-    # ------------------------------------------------------------------
-    # 候选过滤：contains + case-insensitive，仍然只用 QComboBox popup。
-    # ------------------------------------------------------------------
     def _filtered_choices(self, text: str):
         key = str(text or "").strip().casefold()
         if not key:
@@ -134,7 +128,7 @@ class _SearchComboBehavior(QObject):
         if not values:
             combo.hidePopup()
             return
-        # 显式调用基类实现，避免 SearchComboBox.showPopup() 把它重新切回完整列表。
+        # 只打开 QComboBox 自己的 popup，没有第二层 QCompleter。
         QComboBox.showPopup(combo)
         QTimer.singleShot(0, self._restore_edit_focus)
 
@@ -149,9 +143,6 @@ class _SearchComboBehavior(QObject):
         if edit is not None and self.combo.isVisible():
             edit.setFocus(Qt.FocusReason.OtherFocusReason)
 
-    # ------------------------------------------------------------------
-    # 更新可见列表时，必须保留用户当前文字、光标和选区。
-    # ------------------------------------------------------------------
     def _apply_visible_choices(self, values, current_text: str, restore_edit_state=True):
         combo = self.combo
         edit = combo.lineEdit()
@@ -174,13 +165,11 @@ class _SearchComboBehavior(QObject):
                 if restore_edit_state:
                     edit.setCursorPosition(min(cursor, len(text)))
                     if sel_start >= 0 and selected_len > 0:
-                        edit.setSelection(min(sel_start, len(text)), min(selected_len, max(0, len(text) - sel_start)))
+                        start = min(sel_start, len(text))
+                        edit.setSelection(start, min(selected_len, max(0, len(text) - start)))
         finally:
             self._updating = False
 
-    # ------------------------------------------------------------------
-    # 选择提交：真实 currentIndex/currentText/lineEdit.text 一致，然后关 popup。
-    # ------------------------------------------------------------------
     def _on_activated(self, index: int):
         if self._updating:
             return
@@ -208,7 +197,7 @@ class _SearchComboBehavior(QObject):
         text = str(text or "").strip()
         self._committing = True
         try:
-            # 候选提交后恢复完整 model；自由文本不在候选中时 index=-1。
+            # 提交后恢复完整候选；自由文本没有匹配项时保持 index=-1。
             self._apply_visible_choices(self._choices, text, restore_edit_state=False)
             idx = combo.findText(text, Qt.MatchFlag.MatchExactly)
             with QSignalBlocker(combo), QSignalBlocker(edit):
@@ -222,9 +211,6 @@ class _SearchComboBehavior(QObject):
         if emit:
             self.valueCommitted.emit(text)
 
-    # ------------------------------------------------------------------
-    # 外部接口。
-    # ------------------------------------------------------------------
     def set_choices(self, choices, preserve=True, current=None):
         values = list(dict.fromkeys(str(x) for x in (choices or []) if str(x)))
         combo = self.combo
@@ -232,6 +218,7 @@ class _SearchComboBehavior(QObject):
         if not preserve and current is None:
             text = ""
         self._choices = values
+        combo._search_choices = list(values)
         self._apply_visible_choices(values, text, restore_edit_state=False)
         self._committed_text = text.strip()
 
@@ -241,9 +228,25 @@ class _SearchComboBehavior(QObject):
     def set_current_text(self, text, emit=False):
         self.commit_text(str(text or ""), emit=emit)
 
+    def update_legacy_choice_cache(self, values):
+        """兼容 V3 的 `_search_model.setStringList()`，只同步完整候选缓存。"""
+        self._choices = list(dict.fromkeys(str(x) for x in (values or []) if str(x)))
+        self.combo._search_choices = list(self._choices)
+
+
+class _LegacySearchModelAdapter(QObject):
+    """旧 V2/V3 只调用 setStringList；不再创建 QStringListModel/QCompleter。"""
+
+    def __init__(self, behavior: _SearchComboBehavior):
+        super().__init__(behavior.combo)
+        self.behavior = behavior
+
+    def setStringList(self, values):
+        self.behavior.update_legacy_choice_cache(values)
+
 
 class SearchComboBox(QComboBox):
-    """可输入搜索型下拉框；视觉和普通 QComboBox 同源。"""
+    """可输入搜索型下拉框；视觉和普通 QComboBox 完全同源。"""
 
     valueChanged = pyqtSignal(str)
     textEdited = pyqtSignal(str)
@@ -251,11 +254,12 @@ class SearchComboBox(QComboBox):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._search_behavior = _SearchComboBehavior(self)
+        self._search_model = _LegacySearchModelAdapter(self._search_behavior)
         self._search_behavior.valueCommitted.connect(self.valueChanged)
         self._search_behavior.textEdited.connect(self.textEdited)
 
     def showPopup(self):
-        # 外部/右侧箭头要求显示完整候选；过滤 popup 由 behavior 显式调用基类实现。
+        # 用户主动打开 QComboBox 时显示完整候选；过滤 popup 由 behavior 调基类实现。
         self._search_behavior.show_all()
 
     def set_choices(self, choices, preserve=True, current=None):
@@ -289,6 +293,7 @@ def configure_search_combo(combo: QComboBox):
     if behavior is None:
         behavior = _SearchComboBehavior(combo)
         combo._search_behavior = behavior
+        combo._search_model = _LegacySearchModelAdapter(behavior)
         combo._search_choices = behavior.choices()
     return combo
 
