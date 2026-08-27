@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from PyQt6 import sip
 from PyQt6.QtCore import QEvent, QObject, QSignalBlocker, QTimer, Qt, pyqtSignal
-from PyQt6.QtWidgets import QComboBox, QStyle, QStyleOptionComboBox
+from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtWidgets import QApplication, QComboBox, QStyle, QStyleOptionComboBox
 
 
 class _SearchComboBehavior(QObject):
@@ -29,6 +30,8 @@ class _SearchComboBehavior(QObject):
         self._committing = False
         self._destroyed = False
         self._pending_filter_text: str | None = None
+        self._popup_view = None
+        self._popup_viewport = None
 
         combo.destroyed.connect(self._mark_destroyed)
         combo.setEditable(True)
@@ -44,6 +47,7 @@ class _SearchComboBehavior(QObject):
             edit.editingFinished.connect(self._on_editing_finished)
         combo.installEventFilter(self)
         combo.activated.connect(self._on_activated)
+        self._ensure_popup_filters()
 
         self._choices = [combo.itemText(i) for i in range(combo.count())]
         self._committed_text = combo.currentText().strip()
@@ -56,6 +60,8 @@ class _SearchComboBehavior(QObject):
     def _mark_destroyed(self, *_args):
         self._destroyed = True
         self._pending_filter_text = None
+        self._popup_view = None
+        self._popup_viewport = None
         self.combo = None
 
     def _combo(self):
@@ -97,11 +103,125 @@ class _SearchComboBehavior(QObject):
         except (RuntimeError, AttributeError):
             return False
 
+    def _ensure_popup_filters(self):
+        """拦截原生 QComboBox popup 的键盘事件，让编辑键仍作用于输入框。"""
+        combo = self._combo()
+        if combo is None:
+            return
+        try:
+            view = combo.view()
+            if view is None or sip.isdeleted(view):
+                return
+            viewport = view.viewport()
+            if self._popup_view is not view:
+                view.installEventFilter(self)
+                self._popup_view = view
+            if viewport is not None and not sip.isdeleted(viewport) and self._popup_viewport is not viewport:
+                viewport.installEventFilter(self)
+                self._popup_viewport = viewport
+        except (RuntimeError, AttributeError):
+            return
+
+    def _is_popup_target(self, watched):
+        return watched is self._popup_view or watched is self._popup_viewport
+
+    @staticmethod
+    def _popup_navigation_key(event):
+        key = event.key()
+        modifiers = event.modifiers()
+        if key in (
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+            Qt.Key.Key_PageUp,
+            Qt.Key.Key_PageDown,
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+            Qt.Key.Key_Escape,
+        ):
+            return True
+        # F4、Alt+Up/Down 继续保留给标准下拉行为。
+        if key == Qt.Key.Key_F4:
+            return True
+        if modifiers & Qt.KeyboardModifier.AltModifier and key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            return True
+        return False
+
+    @staticmethod
+    def _text_editing_key(event):
+        """popup 打开时仍应由 QLineEdit 处理的按键。"""
+        key = event.key()
+        modifiers = event.modifiers()
+
+        if key in (
+            Qt.Key.Key_Backspace,
+            Qt.Key.Key_Delete,
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_Home,
+            Qt.Key.Key_End,
+        ):
+            return True
+
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            return key in (
+                Qt.Key.Key_A,
+                Qt.Key.Key_C,
+                Qt.Key.Key_V,
+                Qt.Key.Key_X,
+                Qt.Key.Key_Z,
+                Qt.Key.Key_Y,
+                Qt.Key.Key_Left,
+                Qt.Key.Key_Right,
+                Qt.Key.Key_Home,
+                Qt.Key.Key_End,
+                Qt.Key.Key_Backspace,
+                Qt.Key.Key_Delete,
+            )
+
+        # 普通可见字符（包括中文输入法最终提交后的键盘字符）继续交给输入框。
+        text = event.text()
+        return bool(text and not (modifiers & Qt.KeyboardModifier.AltModifier))
+
+    def _forward_popup_key_to_edit(self, event):
+        """把 popup 收到的编辑类按键转发给 QLineEdit，并阻止列表消费该键。"""
+        if self._popup_navigation_key(event) or not self._text_editing_key(event):
+            return False
+        edit = self._edit()
+        if edit is None:
+            return False
+        try:
+            forwarded = QKeyEvent(
+                QEvent.Type.KeyPress,
+                event.key(),
+                event.modifiers(),
+                event.text(),
+                event.isAutoRepeat(),
+                event.count(),
+            )
+            QApplication.sendEvent(edit, forwarded)
+            # 输入框的 textEdited 会在下一轮刷新当前 popup；这里只恢复编辑焦点与光标控制。
+            QTimer.singleShot(0, self._restore_edit_focus)
+            return True
+        except (RuntimeError, AttributeError):
+            return False
+
     def eventFilter(self, watched, event):
         combo = self._combo()
         if combo is None:
             return False
         edit = self._edit()
+
+        # 原生 popup 展开后会接管键盘。候选导航键仍留给列表，其余文本编辑键
+        # 转发给 QLineEdit，因此 Backspace/Delete/直接输入/Ctrl+A/C/V/X 等不会失效。
+        if self._is_popup_target(watched) and self._popup_visible():
+            if event.type() == QEvent.Type.ShortcutOverride and self._text_editing_key(event):
+                try:
+                    event.accept()
+                except Exception:
+                    pass
+                return True
+            if event.type() == QEvent.Type.KeyPress:
+                return self._forward_popup_key_to_edit(event)
 
         if edit is not None and watched is edit:
             if event.type() == QEvent.Type.MouseButtonRelease:
@@ -203,8 +323,10 @@ class _SearchComboBehavior(QObject):
             if not values:
                 combo.hidePopup()
                 return
+            self._ensure_popup_filters()
             # 只打开 QComboBox 自己的 popup，没有第二层 QCompleter。
             QComboBox.showPopup(combo)
+            self._ensure_popup_filters()
             QTimer.singleShot(0, self._restore_edit_focus)
         except RuntimeError:
             return
@@ -222,7 +344,9 @@ class _SearchComboBehavior(QObject):
         if combo is None:
             return
         try:
+            self._ensure_popup_filters()
             QComboBox.showPopup(combo)
+            self._ensure_popup_filters()
         except RuntimeError:
             return
 
