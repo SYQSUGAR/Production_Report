@@ -87,3 +87,45 @@ def test_join_on_skips_incomplete_condition_without_leading_connector():
     sql = qb.build_sql()
     assert " ON t1.equipment_id = t2.equipment_id" in sql
     assert " ON OR " not in sql
+
+
+def test_single_mode_ignores_stale_join_configuration_and_validation():
+    qb = _binding()
+    qb.source_mode = "single"
+    qb.field_name = "t1.equipment_id"
+    qb.joins[0]["conditions"] = []  # 历史 JOIN 即使不完整也必须完全休眠。
+
+    assert qb.validate_joins() == ""
+    sql = qb.build_sql()
+    assert " JOIN " not in sql
+    assert " t1" not in sql
+    assert "SELECT equipment_id FROM production.equipment_status" in sql
+
+
+def test_single_mode_strips_stale_join_aliases_from_field_filter_and_time_field():
+    qb = _binding()
+    qb.source_mode = "single"
+    qb.field_name = "t2.equipment_name"
+    qb.filters = [
+        {"connector": "where", "field": "t2.equipment_type", "op": "=", "value": "锅炉"},
+    ]
+    qb.time_binding.enabled = True
+    qb.time_binding.time_field = "t3.record_time"
+
+    sql = qb.build_sql(time_range=("2026-08-31 00:00:00", "2026-09-01 00:00:00"))
+    assert " JOIN " not in sql
+    assert "t1." not in sql
+    assert "t2." not in sql
+    assert "t3." not in sql
+    assert "SELECT equipment_name FROM production.equipment_status" in sql
+    assert "WHERE equipment_type = '锅炉'" in sql
+    assert "record_time >=" in sql
+
+
+def test_single_mode_join_preview_is_plain_single_table_preview():
+    qb = _binding()
+    qb.source_mode = "single"
+    qb.joins[0]["conditions"] = []
+
+    sql = qb.build_join_preview_sql(limit=20, db_type="mysql")
+    assert sql == "SELECT * FROM production.equipment_status LIMIT 20"
