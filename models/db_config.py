@@ -56,6 +56,10 @@ class QueryBinding:
     joins 使用有序列表保存。新版 JOIN 项结构为：
     ``type/database_name/schema_name/table_name/alias/conditions``。
     conditions 中保存 ``left/op/right/connector``。旧版 ``table/on`` 仍可读取。
+
+    ``source_mode`` 是查询数据来源的唯一开关：
+    - ``single``：只使用单表，任何历史 JOIN 配置都处于休眠状态；
+    - ``join``：才读取、校验和生成 JOIN。
     """
 
     enabled: bool = False
@@ -117,6 +121,22 @@ class QueryBinding:
             filters=data.get("filters", []), date_placeholder=data.get("date_placeholder", ""),
             time_binding=TimeBinding.from_dict(data.get("time_binding")),
         )
+
+    def is_join_mode(self) -> bool:
+        """当前是否真正启用表关联。source_mode 是唯一判断依据。"""
+        return str(self.source_mode or "single").strip().lower() == "join"
+
+    def _active_joins(self) -> list[dict]:
+        """单表模式下 JOIN 永远视为空，即使对象里保留了历史配置。"""
+        return self.joins if self.is_join_mode() else []
+
+    def _field_for_active_mode(self, value: str) -> str:
+        """单表模式去掉历史 JOIN 自动别名，避免 t1/t2 字段残留导致 SQL 失败。"""
+        text = str(value or "").strip()
+        if self.is_join_mode() or not text:
+            return text
+        match = re.match(r"^t\d+\.(.+)$", text, re.I)
+        return match.group(1) if match else text
 
     @staticmethod
     def _format_value(op: str, val) -> str:
@@ -184,7 +204,8 @@ class QueryBinding:
         table_expr = self.table_sql_name()
         if not table_expr:
             return ""
-        alias = (self.source_alias or "").strip()
+        # source_alias 只属于 JOIN 模式。单表模式即使历史对象里残留 t1，也不能带入 SQL。
+        alias = (self.source_alias or "").strip() if self.is_join_mode() else ""
         return f"{table_expr} {alias}" if alias else table_expr
 
     @staticmethod
@@ -229,7 +250,7 @@ class QueryBinding:
 
     def _join_clauses_sql(self) -> str:
         result = ""
-        for join in self.joins:
+        for join in self._active_joins():
             table_expr = self._join_table_sql_name(join)
             on_expr = self._join_on_sql(join)
             if not table_expr or not on_expr:
@@ -239,7 +260,10 @@ class QueryBinding:
         return result
 
     def validate_joins(self) -> str:
-        for index, join in enumerate(self.joins, start=1):
+        # 单表模式下 JOIN 完全休眠，不检查历史 JOIN 是否完整。
+        if not self.is_join_mode():
+            return ""
+        for index, join in enumerate(self._active_joins(), start=1):
             table_expr = self._join_table_sql_name(join)
             if not table_expr:
                 return f"第 {index} 个关联表未选择数据表"
@@ -248,7 +272,7 @@ class QueryBinding:
         return ""
 
     def build_join_preview_sql(self, limit: int = 20, db_type: str = "mysql") -> str:
-        """只生成 FROM + JOIN 的只读样例查询，不应用 WHERE/时间/聚合。"""
+        """生成当前数据来源的只读样例；单表模式绝不读取 JOIN。"""
         source = self._source_from_sql()
         if not source:
             return ""
@@ -256,9 +280,9 @@ class QueryBinding:
         if join_error:
             return ""
         aliases = []
-        if self.source_alias.strip():
+        if self.is_join_mode() and self.source_alias.strip():
             aliases.append(self.source_alias.strip())
-        for join in self.joins:
+        for join in self._active_joins():
             alias = (join.get("alias") or "").strip()
             if alias:
                 aliases.append(alias)
@@ -286,18 +310,19 @@ class QueryBinding:
             return sql
 
         source = self._source_from_sql()
-        if not source or not self.field_name:
+        field_name = self._field_for_active_mode(self.field_name)
+        if not source or not field_name:
             return ""
 
-        field_expr = self.field_name
+        field_expr = field_name
         if self.query_type == QueryType.AGGREGATE and self.aggregate_func:
-            field_expr = f"{self.aggregate_func}({self.field_name})"
+            field_expr = f"{self.aggregate_func}({field_name})"
 
         sql = f"SELECT {field_expr} FROM {source}{self._join_clauses_sql()}"
 
         conditions: list[tuple[str, str]] = []
         for f in self.filters:
-            field_name = f.get("field", "")
+            field_name = self._field_for_active_mode(f.get("field", ""))
             op = f.get("op", "=")
             val = f.get("value", "")
             if not field_name:
@@ -309,11 +334,11 @@ class QueryBinding:
                 f"{field_name} {op} {self._format_value(op, val)}",
             ))
 
-        if time_tokens and self.time_binding.time_field.strip():
+        time_field = self._field_for_active_mode(self.time_binding.time_field)
+        if time_tokens and time_field:
             start_token, end_token = time_tokens
-            tf = self.time_binding.time_field.strip()
-            conditions.append(("AND", f"{tf} >= {start_token}"))
-            conditions.append(("AND", f"{tf} < {end_token}"))
+            conditions.append(("AND", f"{time_field} >= {start_token}"))
+            conditions.append(("AND", f"{time_field} < {end_token}"))
 
         if conditions:
             rendered = []
