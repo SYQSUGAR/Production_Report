@@ -59,15 +59,13 @@ def delete_custom_preset(name: str):
 
 
 def load_template_by_name(name: str) -> TemplateModel:
-    """根据名称加载模板（先查内置，再查自定义）。"""
+    """根据名称加载模板；同名自定义预设优先，可覆盖内置预设。"""
     from export.template_io import TemplateIO
-    # 内置模板
-    if name in BUILTIN_TEMPLATES:
-        return BUILTIN_TEMPLATES[name]()
-    # 自定义模板
     custom = get_custom_presets()
     if name in custom:
         return TemplateIO.load(custom[name])
+    if name in BUILTIN_TEMPLATES:
+        return BUILTIN_TEMPLATES[name]()
     raise ValueError(f"模板 '{name}' 不存在")
 
 
