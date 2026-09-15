@@ -48,12 +48,14 @@ def install_database_binding_v2_finish():
         _refresh_filter_title(self)
         return result
 
-    def add_filter(self):
+    def add_filter(self, *_signal_args):
+        """兼容 QPushButton.clicked(bool) 等会额外传入 checked 参数的 Qt 信号。"""
         result = previous_add_filter(self)
         _refresh_filter_title(self)
         return result
 
-    def remove_filter(self, record):
+    def remove_filter(self, record, *_signal_args):
+        """删除条件同样容忍 Qt 信号附带的额外参数。"""
         result = previous_remove_filter(self, record)
         _refresh_filter_title(self)
         return result
